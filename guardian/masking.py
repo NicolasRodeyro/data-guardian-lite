@@ -1,10 +1,15 @@
-"""Enmascarado de valores sensibles. Ningún hallazgo sale del scanner con el valor completo.
+"""Enmascarado de valores sensibles: lo único que puede viajar a la API.
 
-Paso 2: solo `mask_value`. Snippets de contexto y `mask_text` llegan en el Paso 3.
+`mask_value` conserva el largo del valor. Por eso `mask_text` devuelve un texto con los
+mismos offsets que el original, y `context_snippet` puede recortar sobre el texto ya
+enmascarado sin dejar nunca un valor cortado a medias en el borde.
+
+No confundir con `anonymizer.py`, que reemplaza por placeholders para los archivos de output/.
 """
 
 from __future__ import annotations
 
+from guardian.config import CONTEXT_CHARS
 from guardian.models import DataType
 
 _VISIBLE_LAST = 4
@@ -32,3 +37,21 @@ def mask_value(value: str, data_type: DataType) -> str:
         else:
             salida.append(ch)
     return "".join(salida)
+
+
+def mask_text(text: str) -> str:
+    """Enmascara todos los hallazgos de un texto. El resultado tiene el mismo largo y offsets."""
+    from guardian.scanner import scan_text  # import local: scanner depende de este módulo
+
+    resultado = text
+    for f in sorted(scan_text(text, "<texto>", line=1), key=lambda h: h.start, reverse=True):
+        if len(f.masked_value) != f.end - f.start:
+            raise ValueError("mask_value debe conservar el largo del valor")
+        resultado = resultado[:f.start] + f.masked_value + resultado[f.end:]
+    return resultado
+
+
+def context_snippet(text: str, start: int, end: int, chars: int = CONTEXT_CHARS) -> str:
+    """Fragmento de ±`chars` caracteres alrededor de [start, end), con todo lo sensible enmascarado."""
+    enmascarado = mask_text(text)
+    return enmascarado[max(0, start - chars):end + chars]

@@ -146,3 +146,19 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 - **Decisión:** `email_valido` rechaza los dominios reservados por RFC 2606 (`example.com`, `example.org`, `example.net`, `test`, `invalid`, `localhost`), incluidos sus subdominios.
 - **Alternativas descartadas:** Reportar todos los emails con forma válida (generaría falsos positivos sobre datos de ejemplo); ampliar la lista de dominios de prueba caso por caso.
 - **Consecuencias:** Los emails de ejemplo no aparecen como hallazgos. Un dato real con un dominio reservado no se detectaría, pero esos dominios no pueden pertenecer a personas reales.
+
+## ADR-019 — La anonimización tapa todos los hallazgos del scanner, sin depender de la IA
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** Cuando exista el Clasificador, podría decir que un hallazgo no es sensible (por ejemplo, un monto de 8 dígitos que parece DNI). Hay que decidir si la copia anonimizada respeta esa opinión. Los archivos de injection piden justamente bajar el riesgo de todo.
+- **Decisión:** `anonymize_file` reemplaza por placeholder todo hallazgo del scanner, sin consultar la clasificación. La clasificación se usa para el reporte (riesgo, prioridad, `needs_review`), no para decidir qué se destapa.
+- **Alternativas descartadas:** Dejar visibles los hallazgos que la IA marque como no sensibles (si la IA se equivoca o la manipula una injection, queda PII en una copia que se supone segura; el piso de riesgo no protege DNI ni emails).
+- **Consecuencias:** La copia segura nunca depende del modelo. Se tapa de más: algunos montos quedan como `[DNI_REDACTED]`. Lo que el scanner no detecta tampoco se anonimiza. Si la evaluación muestra que conviene, se puede agregar un filtro opcional sin cambiar el comportamiento por defecto.
+
+## ADR-020 — El enmascarado conserva el largo y los snippets se recortan del texto ya enmascarado
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** El Clasificador necesita un fragmento de contexto alrededor del hallazgo, y el Guardián necesita el texto completo, pero a la API no puede llegar ningún valor crudo (ADR-009). Si se recorta el texto original y después se enmascara, un valor cortado por el borde de la ventana puede no detectarse y asomar en crudo.
+- **Decisión:** `mask_value` conserva el largo del valor (reemplaza dígitos y letras por `*`). `mask_text` enmascara todos los hallazgos de un texto y mantiene los offsets. `context_snippet` enmascara primero el texto completo y recién después recorta la ventana de ±40 caracteres.
+- **Alternativas descartadas:** Recortar primero y enmascarar el fragmento (deja tramos crudos en los bordes); reemplazar por placeholders también para la API (el modelo pierde las pistas de formato que necesita para clasificar).
+- **Consecuencias:** Los offsets del scanner sirven igual sobre el texto enmascarado. Cualquier cambio futuro en `mask_value` tiene que conservar el largo; `mask_text` lanza error si no se cumple.

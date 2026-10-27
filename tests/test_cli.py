@@ -15,5 +15,40 @@ def test_help_sale_con_codigo_0(capsys):
 
 
 def test_subcomando_no_implementado_avisa_el_paso(capsys):
-    assert main(["scan", "x.txt"]) == 2
-    assert "Paso 2" in capsys.readouterr().err
+    assert main(["classify", "x.txt"]) == 2
+    assert "Paso 4" in capsys.readouterr().err
+
+
+def test_scan_muestra_hallazgos_enmascarados(tmp_path, capsys):
+    ruta = tmp_path / "a.txt"
+    ruta.write_text("Pago con 4539 1488 0343 6467\n", encoding="utf-8")
+    assert main(["scan", str(ruta)]) == 0
+    salida = capsys.readouterr().out
+    assert "4539 **** **** 6467" in salida
+    assert "1488" not in salida
+    assert "1 hallazgos" in salida
+
+
+def test_scan_sin_ruta_falla(capsys):
+    assert main(["scan"]) == 2
+    assert "necesita la ruta" in capsys.readouterr().err
+
+
+def test_scan_archivo_no_soportado_devuelve_error(tmp_path, capsys):
+    ruta = tmp_path / "a.pdf"
+    ruta.write_bytes(b"%PDF")
+    assert main(["scan", str(ruta)]) == 1
+    assert "Error" in capsys.readouterr().err
+
+
+def test_anonymize_escribe_en_el_directorio_de_salida(tmp_path, monkeypatch, capsys):
+    import guardian.anonymizer as anonymizer
+
+    monkeypatch.setattr(anonymizer, "DEFAULT_OUTPUT_DIR", tmp_path / "output")
+    ruta = tmp_path / "a.txt"
+    ruta.write_text("DNI 12.345.678\n", encoding="utf-8")
+    assert main(["anonymize", str(ruta)]) == 0
+    destino = tmp_path / "output" / "a.anonymized.txt"
+    assert destino.read_text(encoding="utf-8") == "DNI [DNI_REDACTED]\n"
+    assert main(["anonymize", str(ruta)]) == 1  # ya existe y no se pasó --overwrite
+    assert main(["anonymize", str(ruta), "--overwrite"]) == 0
