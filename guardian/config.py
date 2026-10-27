@@ -7,6 +7,7 @@ no dependen de que exista `.env`.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,13 +44,13 @@ def load_settings(
 ) -> Settings:
     """Arma la configuración. Las variables del entorno pisan a las de `.env`.
 
+    Sin `environ` se usa `os.environ`, así `ANTHROPIC_MODEL=... python ...` cambia el modelo.
     Los tests pasan `env_file=None` y un `environ` explícito para no tocar el `.env` real.
     """
     valores: dict[str, str] = {}
     if env_file is not None and env_file.exists():
         valores.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
-    if environ is not None:
-        valores.update(environ)
+    valores.update(os.environ if environ is None else environ)
 
     api_key = valores.get("ANTHROPIC_API_KEY", "").strip() or None
     modelo = valores.get("ANTHROPIC_MODEL", "").strip() or DEFAULT_MODEL

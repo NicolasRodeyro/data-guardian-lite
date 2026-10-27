@@ -34,6 +34,13 @@ def test_lee_archivo_si_existe(tmp_path: Path):
     assert load_settings(env_file=env, environ={}).anthropic_api_key == "desde-archivo"
 
 
+def test_sin_environ_explicito_usa_las_variables_de_entorno(tmp_path: Path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_MODEL=claude-haiku-5-5\n", encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+    assert load_settings(env_file=env).anthropic_model == "claude-sonnet-5-5"
+
+
 def test_repr_no_expone_la_key():
     s = load_settings(env_file=None, environ={"ANTHROPIC_API_KEY": "sk-ant-secreta-123"})
     assert "sk-ant-secreta-123" not in repr(s)

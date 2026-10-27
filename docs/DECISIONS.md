@@ -162,3 +162,19 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 - **Decisión:** `mask_value` conserva el largo del valor (reemplaza dígitos y letras por `*`). `mask_text` enmascara todos los hallazgos de un texto y mantiene los offsets. `context_snippet` enmascara primero el texto completo y recién después recorta la ventana de ±40 caracteres.
 - **Alternativas descartadas:** Recortar primero y enmascarar el fragmento (deja tramos crudos en los bordes); reemplazar por placeholders también para la API (el modelo pierde las pistas de formato que necesita para clasificar).
 - **Consecuencias:** Los offsets del scanner sirven igual sobre el texto enmascarado. Cualquier cambio futuro en `mask_value` tiene que conservar el largo; `mask_text` lanza error si no se cumple.
+
+## ADR-021 — Integración del clasificador con la API: sin fallback del servidor, fallbacks propios sin caché y re-enmascarado
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** La evaluación final usa Sonnet 5.5, que puede rechazar pedidos (`stop_reason: refusal`) y ofrece un fallback del lado del servidor que reintenta con otro modelo. Haiku 5.5 no lo soporta. Además, `classify_finding` es pública y podría recibir un snippet sin enmascarar desde otro llamador (por ejemplo, el agente del Paso 5).
+- **Decisión:** No se activa el fallback del servidor: un rechazo cae en nuestro fallback fail-closed (`high` + `needs_review`). Los resultados de fallback no se cachean, así se reintentan en la próxima corrida. `classify_finding` vuelve a pasar el snippet por `mask_text` antes de armar el request. Parámetros: `tool_choice: auto`, tool con `strict: true`, `effort: low`, `max_tokens` 2048 (el thinking adaptativo de Haiku cuenta dentro del límite), sin `temperature`. Los rangos que el modo strict no expresa (confianza 0–1, largo de la explicación) los valida Pydantic.
+- **Alternativas descartadas:** Fallback del servidor (parte de las respuestas vendría de otro modelo y ensuciaría la evaluación; además el código quedaría con dos caminos); cachear también los fallbacks (un error transitorio quedaría fijo); confiar en que el llamador enmascare.
+- **Consecuencias:** Toda respuesta de la evaluación es del modelo elegido; los rechazos se cuentan y se reportan. El contrato se verificó con 3 llamadas reales a Haiku 5.5 y a Sonnet 5.5 (tests de integración en verde). Enmascarar dos veces cuesta un escaneo extra por hallazgo.
+
+## ADR-022 — El piso de riesgo también marca el hallazgo como sensible y a revisión
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada (complementa ADR-010)
+- **Contexto:** ADR-010 solo subía el riesgo. Una injection puede lograr que la IA diga `is_sensitive: false` y `risk: low` sobre una tarjeta válida: con el piso solo, quedaría "riesgo alto pero no sensible", una clasificación incoherente que en la evaluación contaría como negativa.
+- **Decisión:** Cuando el piso corrige el riesgo de un hallazgo, también fija `is_sensitive: true` y `needs_review: true`.
+- **Alternativas descartadas:** Subir solo el riesgo y dejar el resto como lo dijo la IA; descartar la respuesta entera y usar el fallback (se pierde la explicación del modelo, que sirve para revisar).
+- **Consecuencias:** Un intento de rebajar un dato validado queda visible como hallazgo a revisar. Puede aumentar los `needs_review` en la evaluación.

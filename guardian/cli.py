@@ -9,6 +9,9 @@ import argparse
 import sys
 
 from guardian.anonymizer import AnonymizeError, anonymize_file
+from guardian.classifier import classify_file
+from guardian.config import load_settings
+from guardian.llm import MissingAPIKeyError, estimate_cost, get_client
 from guardian.scanner import ScanError, scan_file
 
 # subcomando -> (descripción, paso del plan que lo implementa)
@@ -36,7 +39,36 @@ def _cmd_anonymize(args: argparse.Namespace) -> int:
     return 0
 
 
-IMPLEMENTADOS = {"scan": _cmd_scan, "anonymize": _cmd_anonymize}
+def _cmd_classify(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    client = get_client(settings)
+    resultados = classify_file(args.ruta, client, model=settings.anthropic_model)
+    for r in resultados:
+        c = r.classification
+        marcas = []
+        if r.fallback_reason:
+            marcas.append(f"fallback: {r.fallback_reason}")
+        if r.floor_applied:
+            marcas.append("piso de riesgo")
+        if r.cached:
+            marcas.append("caché")
+        extra = f"  [{', '.join(marcas)}]" if marcas else ""
+        print(
+            f"{r.finding.data_type.value:<12} {r.finding.masked_value:<45} "
+            f"riesgo={c.risk.value:<8} sensible={'sí' if c.is_sensitive else 'no'} "
+            f"revisar={'sí' if c.needs_review else 'no'}{extra}"
+        )
+    tokens_in = sum(r.input_tokens for r in resultados)
+    tokens_out = sum(r.output_tokens for r in resultados)
+    llamadas = sum(1 for r in resultados if not r.cached)
+    costo = estimate_cost(settings.anthropic_model, tokens_in, tokens_out)
+    costo_txt = f"USD {costo:.4f}" if costo is not None else "costo desconocido para este modelo"
+    print(f"{len(resultados)} hallazgos · {llamadas} llamadas a {settings.anthropic_model} · "
+          f"{tokens_in} tokens de entrada, {tokens_out} de salida · {costo_txt}")
+    return 0
+
+
+IMPLEMENTADOS = {"scan": _cmd_scan, "anonymize": _cmd_anonymize, "classify": _cmd_classify}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return handler(args)
-    except (ScanError, AnonymizeError, FileNotFoundError) as exc:
+    except (ScanError, AnonymizeError, MissingAPIKeyError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

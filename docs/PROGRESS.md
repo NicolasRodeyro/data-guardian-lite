@@ -6,7 +6,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - [X] Paso 1 — Datos sintéticos + labels.jsonl + file_labels.jsonl (archivos de injection)
 - [X] Paso 2 — Scanner regex + validadores (Luhn, CUIT)
 - [X] Paso 3 — Anonimización (output/, original intacto) + mask_text
-- [ ] Paso 4 — Clasificación IA (tool use, Pydantic, fallback, piso de riesgo, caché)
+- [X] Paso 4 — Clasificación IA (tool use, Pydantic, fallback, piso de riesgo, caché)
 - [ ] Paso 5 — Agente único (lista blanca, límite de pasos, sandbox, auditoría)
 - [ ] Paso 6 — Evaluación v1: reglas vs. reglas+clasificador  ← hito entregable v1
 
@@ -27,3 +27,4 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - Paso 2: código y tests listos (77 tests verdes en la suite completa). Smoke test: todos los positivos del dataset se detectan y ningún negativo de tarjeta, CUIT, API key o email se reporta. Commit del paso 2 hecho junto con el checkbox. Decisiones registradas en ADR-017 y ADR-018.
 - Paso 3: código y tests listos (110 tests verdes, 18 de seguridad). Se aplicó la skill `guardian-security-check` sin incumplimientos. También se conectaron `scan` y `anonymize` en la CLI (`scan` era del Paso 2 y había quedado pendiente). Decisiones en ADR-019 y ADR-020. Commit del paso 3 hecho junto con el checkbox.
 - Para el Paso 5: `anonymize_file` acepta `output_dir` y `output_name`; la tool del agente no debe exponerlos al modelo. La lectura bajo `INPUT_DIR` se impone en `agent_tools`, no en el scanner.
+- Paso 4: código y tests listos (141 unitarios verdes, 26 de seguridad). Integración real en verde con Haiku 5.5 y con Sonnet 5.5 (3 llamadas cada uno). Skill `guardian-security-check` aplicada: se reforzó `classify_finding` para que vuelva a enmascarar el snippet. Se corrigió `load_settings()` para que las variables de entorno pisen `.env` (necesario para `ANTHROPIC_MODEL=claude-sonnet-5-5`). Decisiones en ADR-021 y ADR-022. Commit del paso 4 hecho junto con el checkbox.
