@@ -178,3 +178,19 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 - **Decisión:** Cuando el piso corrige el riesgo de un hallazgo, también fija `is_sensitive: true` y `needs_review: true`.
 - **Alternativas descartadas:** Subir solo el riesgo y dejar el resto como lo dijo la IA; descartar la respuesta entera y usar el fallback (se pierde la explicación del modelo, que sirve para revisar).
 - **Consecuencias:** Un intento de rebajar un dato validado queda visible como hallazgo a revisar. Puede aumentar los `needs_review` en la evaluación.
+
+## ADR-023 — Herramientas del agente en lote y anonymize con overwrite
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** El plan preveía `classify_finding(finding_id)`, de a un hallazgo. Un archivo puede tener decenas de hallazgos y el agente tiene un límite de 8 pasos (`MAX_AGENT_STEPS`); además, cada paso reenvía el historial completo. Por otro lado, `anonymize_file` no sobrescribe sin `overwrite=True`, y el modelo no puede pasar ese parámetro: una segunda corrida sobre el mismo archivo fallaría.
+- **Decisión:** `classify_findings(finding_ids)` y `recommend_actions(finding_ids)` reciben listas (hasta 100 IDs, deduplicados, solo IDs devueltos por `scan_file` en la misma corrida). La herramienta `anonymize` llama a `anonymize_file` con `overwrite=True`, sin exponer `output_dir` ni `output_name` al modelo.
+- **Alternativas descartadas:** Herramientas de a un hallazgo (no entran en el límite de pasos y encarecen cada turno); subir el límite de pasos (debilita el control); dejar que el modelo decida `overwrite` (más superficie de manipulación).
+- **Consecuencias:** El flujo completo entra en unos 5 pasos, y coincide con el `classify_findings` previsto para el Orquestador (Paso 7). `overwrite` solo puede pisar una copia previa dentro de `output/`; el original nunca se escribe.
+
+## ADR-024 — El agente no recibe texto libre y la auditoría enmascara los inputs
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** El texto de los archivos no es confiable, y la explicación que escribe el clasificador también es texto libre generado a partir de ese contenido: podría arrastrar una injection hasta el agente. A su vez, los inputs de las herramientas los escribe el modelo y pueden traer cualquier cosa, incluso valores crudos.
+- **Decisión:** Los resultados de las herramientas solo llevan campos estructurados: IDs, tipos, valores enmascarados, riesgo, confianza y banderas. La explicación del clasificador no vuelve al agente, y los snippets solo los usa el clasificador. Los errores de validación informan campo y motivo, nunca el valor enviado. La auditoría (`logs/audit.jsonl`) pasa el nombre de la herramienta y sus inputs por `mask_text` y los trunca antes de escribirlos. Es la única escritura fuera de `output/`, en una ruta fija que el modelo no controla.
+- **Alternativas descartadas:** Devolver la explicación al agente para enriquecer el resumen; auditar los inputs tal como llegan.
+- **Consecuencias:** El agente arma su resumen solo con datos estructurados. La auditoría no puede filtrar PII aunque el modelo la invente o la copie en un argumento.

@@ -15,8 +15,63 @@ def test_help_sale_con_codigo_0(capsys):
 
 
 def test_subcomando_no_implementado_avisa_el_paso(capsys):
-    assert main(["agent", "x.txt"]) == 2
-    assert "Paso 5" in capsys.readouterr().err
+    assert main(["eval", "x.txt"]) == 2
+    assert "Paso 6" in capsys.readouterr().err
+
+
+def _settings_de_prueba(tmp_path):
+    from guardian.config import Settings
+
+    return Settings(anthropic_api_key="falsa", anthropic_model="claude-haiku-5-5",
+                    input_dir=tmp_path / "in", output_dir=tmp_path / "out", logs_dir=tmp_path / "logs")
+
+
+def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    import guardian.classifier as classifier
+    import guardian.cli as cli
+    from tests.conftest import FakeClient, text_response, tool_use_response
+
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "pagos.txt").write_text("Pago con 4539 1488 0343 6467\n", encoding="utf-8")
+    fid = "pagos.txt:L1:9"
+
+    def pedido(nombre, entrada):
+        bloque = SimpleNamespace(type="tool_use", id=f"t_{nombre}", name=nombre, input=entrada)
+        return SimpleNamespace(stop_reason="tool_use", content=[bloque], usage=SimpleNamespace(input_tokens=100, output_tokens=20))
+
+    cliente = FakeClient([  # agente y clasificador comparten cliente, como en producción
+        pedido("scan_file", {"path": "pagos.txt"}),
+        pedido("classify_findings", {"finding_ids": [fid]}),
+        tool_use_response("report_classification", {
+            "is_sensitive": True, "risk": "high", "data_type": "credit_card",
+            "confidence": 0.9, "explanation": "Tarjeta.", "needs_review": False}),
+        pedido("recommend_actions", {"finding_ids": [fid]}),
+        pedido("anonymize", {"path": "pagos.txt"}),
+        text_response("1 hallazgo de riesgo alto. Copia: pagos.anonymized.txt"),
+    ])
+    monkeypatch.setattr(cli, "load_settings", lambda: _settings_de_prueba(tmp_path))
+    monkeypatch.setattr(cli, "get_client", lambda settings: cliente)
+    monkeypatch.setattr(classifier, "DEFAULT_CACHE_DIR", tmp_path / "cache")
+
+    assert main(["agent", str(tmp_path / "in" / "pagos.txt")]) == 0
+    salida = capsys.readouterr().out
+    assert "Estado: completed" in salida and "anonymize" in salida
+    assert (tmp_path / "out" / "pagos.anonymized.txt").exists()
+    assert (tmp_path / "logs" / "audit.jsonl").exists()
+    assert "1488" not in salida
+
+
+def test_agent_rechaza_archivos_fuera_del_directorio_de_entrada(tmp_path, monkeypatch, capsys):
+    import guardian.cli as cli
+
+    (tmp_path / "in").mkdir()
+    afuera = tmp_path / "afuera.txt"
+    afuera.write_text("DNI 12.345.678\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "load_settings", lambda: _settings_de_prueba(tmp_path))
+    assert main(["agent", str(afuera)]) == 1
+    assert "dentro de" in capsys.readouterr().err
 
 
 def test_classify_muestra_resultados_y_costo(tmp_path, monkeypatch, capsys):

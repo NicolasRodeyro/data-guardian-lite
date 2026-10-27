@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
+from guardian.agent import run_agent
+from guardian.agent_tools import AgentSession
 from guardian.anonymizer import AnonymizeError, anonymize_file
+from guardian.audit import AuditLog
 from guardian.classifier import classify_file
 from guardian.config import load_settings
 from guardian.llm import MissingAPIKeyError, estimate_cost, get_client
@@ -68,7 +72,37 @@ def _cmd_classify(args: argparse.Namespace) -> int:
     return 0
 
 
-IMPLEMENTADOS = {"scan": _cmd_scan, "anonymize": _cmd_anonymize, "classify": _cmd_classify}
+def _cmd_agent(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    base = settings.input_dir.resolve()
+    ruta = Path(args.ruta).resolve()
+    if not ruta.is_relative_to(base):
+        print(f"Error: el archivo tiene que estar dentro de {settings.input_dir}", file=sys.stderr)
+        return 1
+    client = get_client(settings)
+    session = AgentSession(client=client, model=settings.anthropic_model,
+                           input_dir=settings.input_dir, output_dir=settings.output_dir)
+    audit = AuditLog(path=settings.logs_dir / "audit.jsonl")
+    tarea = f"Analizá el archivo {ruta.relative_to(base).as_posix()}."
+    r = run_agent(tarea, client, session, audit=audit)
+
+    for llamada in r.tool_calls:
+        print(f"paso {llamada.step}: {llamada.tool:<18} → {llamada.outcome}")
+    print(f"\nEstado: {r.status} ({r.steps} pasos)")
+    if r.final_text:
+        print(f"\n{r.final_text}\n")
+    clasif = list(session.classifications.values())
+    tokens_in = r.input_tokens + sum(c.input_tokens for c in clasif)
+    tokens_out = r.output_tokens + sum(c.output_tokens for c in clasif)
+    costo = estimate_cost(settings.anthropic_model, tokens_in, tokens_out)
+    costo_txt = f"USD {costo:.4f}" if costo is not None else "costo desconocido para este modelo"
+    print(f"{session.api_calls} llamadas a {settings.anthropic_model} · {tokens_in} tokens de entrada, "
+          f"{tokens_out} de salida · {costo_txt}")
+    print(f"Auditoría: {audit.path} (run_id {audit.run_id})")
+    return 0 if r.status == "completed" else 1
+
+
+IMPLEMENTADOS = {"scan": _cmd_scan, "anonymize": _cmd_anonymize, "classify": _cmd_classify, "agent": _cmd_agent}
 
 
 def build_parser() -> argparse.ArgumentParser:

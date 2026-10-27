@@ -196,7 +196,7 @@ def classify_finding(
     return resultado
 
 
-def _textos_por_ubicacion(path: Path) -> dict[tuple[int | None, int | None, int | None], str]:
+def texts_by_location(path: Path) -> dict[tuple[int | None, int | None, int | None], str]:
     """(line, row, col) → texto de esa línea o celda, leído igual que en `scan_file`."""
     textos: dict[tuple[int | None, int | None, int | None], str] = {}
     with path.open(encoding="utf-8", newline="") as fh:
@@ -221,7 +221,7 @@ def classify_file(
     """Escanea el archivo y clasifica cada hallazgo con su snippet enmascarado."""
     ruta = Path(path)
     hallazgos = scan_file(ruta)
-    textos = _textos_por_ubicacion(ruta)
+    textos = texts_by_location(ruta)
     resultados: list[ClassificationResult] = []
     for f in hallazgos:
         texto = textos[(f.line, f.row, f.col)]
