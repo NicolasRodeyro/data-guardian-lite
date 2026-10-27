@@ -1,0 +1,30 @@
+Contacto: María Torres — martina.gonzalez@consultora-rio.com.ar — DNI 26206164
+Contacto: Mateo Torres — santiago.lopez@clinica-andes.com.ar — DNI 23819279
+Contacto: Joaquín Pérez — martina.rodriguez@estudio-lopez.com.ar — DNI 27732134
+Contacto: María Torres — santiago.perez38@tienda-norte.com.ar — DNI 57.162.591
+Contacto: Mateo Pérez — sofia.gomez@tienda-norte.com.ar — DNI 18.042.389
+Escribir a pruebas@example.com por consultas
+Contacto: Tomás Fernández — joaquin.gomez@consultora-rio.com.ar — DNI 12.053.254
+Contacto: Mateo Díaz — sofia.gomez51@estudio-lopez.com.ar — DNI 24747514
+Contacto: Tomás Gómez — martina.fernandez@tienda-norte.com.ar — DNI 14270983
+Contacto: Tomás González — lautaro.sosa@clinica-andes.com.ar — DNI 21855701
+Contacto: Martina Romero — joaquin.fernandez@estudio-lopez.com.ar — DNI 16.380.276
+Escribir a pruebas@example.com por consultas
+Contacto: María Fernández — tomas.rodriguez69@panaderia-sol.com.ar — DNI 33.081.580
+Contacto: Martina Sosa — camila.torres@panaderia-sol.com.ar — DNI 34842429
+Contacto: Tomás Torres — camila.fernandez48@panaderia-sol.com.ar — DNI 36.754.935
+Contacto: Mateo Gómez — juan.gomez@tienda-norte.com.ar — DNI 11.063.447
+Contacto: Mateo Rodríguez — tomas.rodriguez@clinica-andes.com.ar — DNI 8.433.274
+Escribir a pruebas@example.com por consultas
+Contacto: Santiago López — lucia.torres98@clinica-andes.com.ar — DNI 20902095
+Contacto: Mateo Gómez — lucia.torres19@panaderia-sol.com.ar — DNI 43.253.245
+Contacto: Lucía Rodríguez — martina.gonzalez46@panaderia-sol.com.ar — DNI 46.517.250
+Contacto: Lucía Fernández — maria.perez@clinica-andes.com.ar — DNI 14626875
+Contacto: Tomás Romero — santiago.sosa@consultora-rio.com.ar — DNI 40.812.042
+Escribir a pruebas@example.com por consultas
+Contacto: Lautaro González — joaquin.sosa@estudio-lopez.com.ar — DNI 11081923
+Contacto: Camila Díaz — martina.rodriguez@consultora-rio.com.ar — DNI 11931878
+Contacto: Santiago Torres — lucia.rodriguez80@clinica-andes.com.ar — DNI 43799577
+Contacto: Camila Torres — sofia.fernandez@clinica-andes.com.ar — DNI 35.870.188
+Contacto: Joaquín Rodríguez — martina.sosa@panaderia-sol.com.ar — DNI 35.861.505
+Escribir a pruebas@example.com por consultas

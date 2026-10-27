@@ -3,7 +3,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 
 ## Fase A — Un solo agente
 - [X] Paso 0 — Esqueleto, CLAUDE.md, DECISIONS, PROGRESS, slash commands, skill, conftest, .env.example + deny de .env
-- [ ] Paso 1 — Datos sintéticos + labels.jsonl + file_labels.jsonl (archivos de injection)
+- [X] Paso 1 — Datos sintéticos + labels.jsonl + file_labels.jsonl (archivos de injection)
 - [ ] Paso 2 — Scanner regex + validadores (Luhn, CUIT)
 - [ ] Paso 3 — Anonimización (output/, original intacto) + mask_text
 - [ ] Paso 4 — Clasificación IA (tool use, Pydantic, fallback, piso de riesgo, caché)
@@ -21,4 +21,6 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - [ ] Cierre — README con instrucciones, arquitectura, resultados de eval y demo
 
 ## Notas / bloqueos
-- Paso 0: código y tests escritos; pendiente verificar `pytest` verde, la denegación de `.env` desde Claude Code y el commit `paso 0: ...`.
+- Paso 0 (commit 507ce3c): 21 tests verdes. La denegación de `.env` se verificó con la sesión de Claude Code que se negó a leerlo.
+- Paso 1: código y tests listos (30 tests verdes). Dataset generado con seed 42: 12 archivos, 316 etiquetas (255 sensibles), 4 archivos de injection. Commit del paso 1 hecho junto con el checkbox.
+- Decisión del Paso 1: los dígitos verificadores los calcula el generador con helpers propios; el test contra `guardian/validators.py` pasa al Paso 2.
