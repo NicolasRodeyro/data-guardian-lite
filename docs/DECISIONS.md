@@ -194,3 +194,20 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 - **Decisión:** Los resultados de las herramientas solo llevan campos estructurados: IDs, tipos, valores enmascarados, riesgo, confianza y banderas. La explicación del clasificador no vuelve al agente, y los snippets solo los usa el clasificador. Los errores de validación informan campo y motivo, nunca el valor enviado. La auditoría (`logs/audit.jsonl`) pasa el nombre de la herramienta y sus inputs por `mask_text` y los trunca antes de escribirlos. Es la única escritura fuera de `output/`, en una ruta fija que el modelo no controla.
 - **Alternativas descartadas:** Devolver la explicación al agente para enriquecer el resumen; auditar los inputs tal como llegan.
 - **Consecuencias:** El agente arma su resumen solo con datos estructurados. La auditoría no puede filtrar PII aunque el modelo la invente o la copie en un argumento.
+
+## ADR-025 — Reglas de matching de la evaluación y qué cuenta como positivo
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** Para comparar "solo reglas" con "reglas + clasificador" hace falta una forma única de cruzar hallazgos con `labels.jsonl`. El dataset tiene etiquetas negativas (montos, tarjetas que no pasan Luhn, etc.) que las reglas a veces detectan, y el clasificador puede fallar (fallback) o dudar (`needs_review`).
+- **Decisión:** Un hallazgo coincide con una etiqueta si están en el mismo archivo y la misma línea o celda, tienen el mismo tipo y el hallazgo cubre al menos el 50 % del span de la etiqueta. Las métricas son las siguientes:
+  - **TP:** hallazgo positivo sobre una etiqueta sensible. Cada etiqueta cuenta una sola vez.
+  - **FP:** hallazgo positivo sin etiqueta, sobre una etiqueta negativa o duplicado.
+  - **FN:** etiqueta sensible sin hallazgo positivo.
+  - **FP evitados:** hallazgos que el modo descartó y no eran sensibles.
+
+  En el modo clasificador, un hallazgo es positivo si la IA lo marca `is_sensitive` **o** `needs_review`. Los fallbacks son fail-closed y, por lo tanto, también cuentan como positivos. Las etiquetas se cargan sin `value`, y la explicación del modelo se vuelve a enmascarar antes de entrar al reporte. La evaluación no es un agente: no aplica `MAX_API_CALLS_PER_RUN`, y el número de llamadas está acotado por la cantidad de hallazgos. La caché evita repetir el gasto.
+- **Alternativas descartadas:**
+  - Matching exacto por span: penaliza diferencias de separadores.
+  - Contar `needs_review` como negativo: premiaría a un clasificador que duda.
+  - Evaluar a nivel archivo: oculta qué tipos fallan.
+- **Consecuencias:** El recall del modo clasificador nunca supera al de las reglas; la IA solo puede mejorar la precisión. Un clasificador que manda todo a revisión no gana precisión, y eso es intencional: lo que se mide es cuánto filtra con seguridad.

@@ -14,9 +14,26 @@ def test_help_sale_con_codigo_0(capsys):
     assert "scan" in capsys.readouterr().out
 
 
-def test_subcomando_no_implementado_avisa_el_paso(capsys):
-    assert main(["eval", "x.txt"]) == 2
-    assert "Paso 6" in capsys.readouterr().err
+def test_todos_los_subcomandos_estan_implementados():
+    from guardian.cli import IMPLEMENTADOS
+
+    assert set(IMPLEMENTADOS) == set(SUBCOMANDOS)
+
+
+def test_eval_rules_genera_reporte_sin_api(tmp_path, monkeypatch, capsys):
+    import guardian.cli as cli
+    from guardian.config import ROOT, Settings
+
+    def sin_cliente(settings):
+        raise AssertionError("el modo rules no debe crear cliente")
+
+    monkeypatch.setattr(cli, "load_settings", lambda: Settings(input_dir=ROOT / "data" / "synthetic",
+                                                               output_dir=tmp_path / "out"))
+    monkeypatch.setattr(cli, "get_client", sin_cliente)
+    assert main(["eval", "--mode", "rules"]) == 0
+    assert "recall=100.0%" in capsys.readouterr().out
+    assert (tmp_path / "out" / "eval_report.md").exists()
+    assert (tmp_path / "out" / "eval_report.json").exists()
 
 
 def _settings_de_prueba(tmp_path):

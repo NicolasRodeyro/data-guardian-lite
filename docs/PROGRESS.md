@@ -8,7 +8,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - [X] Paso 3 — Anonimización (output/, original intacto) + mask_text
 - [X] Paso 4 — Clasificación IA (tool use, Pydantic, fallback, piso de riesgo, caché)
 - [X] Paso 5 — Agente único (lista blanca, límite de pasos, sandbox, auditoría)
-- [ ] Paso 6 — Evaluación v1: reglas vs. reglas+clasificador  ← hito entregable v1
+- [X] Paso 6 — Evaluación v1: reglas vs. reglas+clasificador  ← hito entregable v1
 
 ## Fase B — Multiagente
 - [ ] Paso 7 — BaseAgent + Orquestador + Clasificador como agente + reporte final
@@ -29,3 +29,4 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - Para el Paso 5: `anonymize_file` acepta `output_dir` y `output_name`; la tool del agente no debe exponerlos al modelo. La lectura bajo `INPUT_DIR` se impone en `agent_tools`, no en el scanner.
 - Paso 4: código y tests listos (141 unitarios verdes, 26 de seguridad). Integración real en verde con Haiku 5.5 y con Sonnet 5.5 (3 llamadas cada uno). Skill `guardian-security-check` aplicada: se reforzó `classify_finding` para que vuelva a enmascarar el snippet. Se corrigió `load_settings()` para que las variables de entorno pisen `.env` (necesario para `ANTHROPIC_MODEL=claude-sonnet-5-5`). Decisiones en ADR-021 y ADR-022. Commit del paso 4 hecho junto con el checkbox.
 - Paso 5: código y tests listos (179 unitarios verdes, 41 de seguridad; 1 test de symlink se saltea en Windows por falta de permisos). Integración real del agente en verde con Haiku. Skill `guardian-security-check` aplicada sin incumplimientos. `classify` y `recommend` quedaron en lote (ADR-023); el agente no recibe texto libre y la auditoría enmascara inputs (ADR-024). Commit del paso 5 hecho junto con el checkbox.
+- Paso 6: `guardian/evaluation.py` + `eval --mode rules|classifier|both` → `output/eval_report.{md,json}`. 202 unitarios verdes. Matching y criterio de positivo en ADR-025. Corrida real con Haiku: reglas P=94.4% R=100% (15 FP, todos DNI); reglas+clasificador P=97.3% R=100% (7 FP, 8 FP evitados), 256 llamadas, USD 0.077, ~11 min (secuencial), 0 fallbacks. Commit del paso 6 hecho junto con el checkbox (hito v1).

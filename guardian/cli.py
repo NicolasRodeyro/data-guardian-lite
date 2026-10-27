@@ -1,7 +1,4 @@
-"""CLI de Data Guardian: scan | anonymize | classify | agent | eval.
-
-Cada subcomando se implementa en su paso del plan; los pendientes avisan en cuál.
-"""
+"""CLI de Data Guardian: scan | anonymize | classify | agent | eval."""
 
 from __future__ import annotations
 
@@ -15,6 +12,7 @@ from guardian.anonymizer import AnonymizeError, anonymize_file
 from guardian.audit import AuditLog
 from guardian.classifier import classify_file
 from guardian.config import load_settings
+from guardian.evaluation import MODES, format_pct, run_evaluation, write_report
 from guardian.llm import MissingAPIKeyError, estimate_cost, get_client
 from guardian.scanner import ScanError, scan_file
 
@@ -102,7 +100,30 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return 0 if r.status == "completed" else 1
 
 
-IMPLEMENTADOS = {"scan": _cmd_scan, "anonymize": _cmd_anonymize, "classify": _cmd_classify, "agent": _cmd_agent}
+def _cmd_eval(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    modos = list(MODES) if args.mode == "both" else [args.mode]
+    client = get_client(settings) if "classifier" in modos else None
+    reporte = run_evaluation(modos, settings.input_dir, client=client, model=settings.anthropic_model,
+                             cache_dir=settings.output_dir / ".cache" / "classifications")
+    for m in reporte["modes"]:
+        x = m["metrics"]
+        print(f"{m['mode']:<11} precisión={format_pct(x['precision']):>6} recall={format_pct(x['recall']):>6} "
+              f"F1={format_pct(x['f1']):>6}  TP={x['tp']} FP={x['fp']} FN={x['fn']} FP evitados={x['tn']}")
+        s = m["stats"]
+        if m["mode"] == "classifier":
+            costo = f"USD {s['cost_usd']:.4f}" if s["cost_usd"] is not None else "costo desconocido"
+            print(f"{'':<11} {s['api_calls']} llamadas a {s['model']} ({s['cached']} desde caché) · "
+                  f"{s['input_tokens']} tokens de entrada, {s['output_tokens']} de salida · {costo} · "
+                  f"needs_review={s['needs_review']} fallbacks={s['fallbacks']}")
+    md, js = write_report(reporte, settings.output_dir)
+    print(f"Reporte: {md} y {js}")
+    return 0
+
+
+IMPLEMENTADOS = {"scan": _cmd_scan, "anonymize": _cmd_anonymize, "classify": _cmd_classify,
+                 "agent": _cmd_agent, "eval": _cmd_eval}
+SIN_RUTA = {"eval"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -110,6 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="comando", required=True)
     for nombre, (descripcion, _paso) in SUBCOMANDOS.items():
         p = sub.add_parser(nombre, help=descripcion)
+        if nombre in SIN_RUTA:
+            p.add_argument("--mode", choices=[*MODES, "both"], default="both",
+                           help="rules: solo reglas · classifier: reglas + IA · both: los dos (default)")
+            continue
         p.add_argument("ruta", nargs="?", help="archivo de entrada (dentro de data/)")
         if nombre == "anonymize":
             p.add_argument("--overwrite", action="store_true", help="reemplaza la copia si ya existe")
@@ -123,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         _descripcion, paso = SUBCOMANDOS[args.comando]
         print(f"'{args.comando}' todavía no está implementado (se hace en el Paso {paso}).", file=sys.stderr)
         return 2
-    if args.ruta is None:
+    if args.comando not in SIN_RUTA and args.ruta is None:
         print(f"'{args.comando}' necesita la ruta de un archivo.", file=sys.stderr)
         return 2
     try:
