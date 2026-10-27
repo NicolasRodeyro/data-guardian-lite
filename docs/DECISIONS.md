@@ -130,3 +130,19 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 - **Decisión:** v1 con un agente primero, multiagente después. `.env` ignorado por git, `deny` en `.claude/settings.json` para leerlo, y la key la carga el usuario a mano.
 - **Alternativas descartadas:** Construir todo multiagente de una; key por variable de entorno del sistema.
 - **Consecuencias:** Siempre hay algo entregable; la protección de `.env` vía Bash es best-effort.
+
+## ADR-017 — Resolución de solapamientos y rango plausible del DNI
+- **Fecha:** 2026-10-26
+- **Estado:** Aceptada
+- **Contexto:** Un CUIT contiene un número con forma de DNI (`20-12345678-6` tiene `12345678`), así que hay que decidir qué span gana. El plan no fijaba el rango de DNI plausible.
+- **Decisión:** Al resolver solapamientos gana el span más largo que haya pasado su validador; a igual largo, prioridad CUIT → tarjeta → DNI → email → API key. Un DNI es plausible si tiene 7 u 8 dígitos (con o sin puntos) dentro de 1.000.000 a 60.000.000.
+- **Alternativas descartadas:** Resolver solo por prioridad de tipo (un tipo corto podría ganarle a uno más largo que lo contiene); aceptar cualquier número de 7–8 dígitos como DNI (sin límite de rango).
+- **Consecuencias:** Montos y números de pedido de 8 dígitos dentro del rango se reportan como DNI. Son falsos positivos intencionales, que la evaluación mide. Un CUIT inválido no se reporta, pero su número interno puede aparecer como DNI.
+
+## ADR-018 — Dominios reservados de ejemplo no son PII
+- **Fecha:** 2026-10-26
+- **Estado:** Aceptada
+- **Contexto:** El generador usa emails `@example.com` como negativos. Como tienen forma de email válido, el scanner los reportaría si no hay una regla que lo impida.
+- **Decisión:** `email_valido` rechaza los dominios reservados por RFC 2606 (`example.com`, `example.org`, `example.net`, `test`, `invalid`, `localhost`), incluidos sus subdominios.
+- **Alternativas descartadas:** Reportar todos los emails con forma válida (generaría falsos positivos sobre datos de ejemplo); ampliar la lista de dominios de prueba caso por caso.
+- **Consecuencias:** Los emails de ejemplo no aparecen como hallazgos. Un dato real con un dominio reservado no se detectaría, pero esos dominios no pueden pertenecer a personas reales.
