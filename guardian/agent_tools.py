@@ -1,48 +1,32 @@
-"""Herramientas del agente v1: lista blanca, inputs validados con Pydantic y sandbox de rutas.
+"""Herramientas del Orquestador y `RunState`: el orden del pipeline se impone acá, en código.
 
-Reglas que se cumplen acá, en código:
-- Solo existen las herramientas de ALLOWED_TOOLS; cualquier otro nombre se rechaza sin ejecutar.
+Reglas que se cumplen acá:
 - Las rutas se resuelven contra el directorio de entrada; `../`, absolutas externas y symlinks
   que escapen se rechazan antes de abrir nada.
+- Orden (ADR-013): `classify_findings`, `anonymize` y `build_report` exigen que el archivo se
+  haya escaneado en esta corrida; `build_report` exige además todos sus hallazgos clasificados.
 - Ningún resultado trae texto crudo del archivo: solo IDs, tipos, valores enmascarados y
-  campos estructurados. La explicación libre del clasificador no vuelve al agente.
-- `anonymize` no expone `output_dir` ni `output_name` al modelo.
+  campos estructurados. La explicación libre del Clasificador no vuelve al Orquestador.
+- `anonymize` y `build_report` no exponen rutas de salida al modelo.
+La lista blanca del Orquestador está en `agents/orchestrator.py`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
+from guardian.agents.base import Budget, ToolError
 from guardian.anonymizer import AnonymizeError, anonymize_file
+from guardian.audit import AuditLog
 from guardian.classifier import ClassificationResult, classify_finding, texts_by_location
-from guardian.config import MAX_API_CALLS_PER_RUN
 from guardian.masking import context_snippet
-from guardian.models import Finding, RiskLevel
+from guardian.models import Finding
+from guardian.report import ReportError, build_file_report, write_file_report
 from guardian.scanner import ScanError, scan_file
-
-RECOMMENDED_ACTIONS: dict[RiskLevel, str] = {
-    RiskLevel.LOW: "sin acción",
-    RiskLevel.MEDIUM: "revisar y restringir el acceso",
-    RiskLevel.HIGH: "anonimizar antes de compartir",
-    RiskLevel.CRITICAL: "anonimizar y rotar la credencial",
-}
-
-
-class ToolError(Exception):
-    """Error que vuelve al modelo como tool_result con is_error. `outcome` va a la auditoría."""
-
-    def __init__(self, message: str, outcome: str = "error") -> None:
-        super().__init__(message)
-        self.outcome = outcome
-
-
-class ApiBudgetExceeded(Exception):
-    """Se alcanzó MAX_API_CALLS_PER_RUN. Corta la corrida completa."""
 
 
 class PathInput(BaseModel):
@@ -56,20 +40,23 @@ class FindingIdsInput(BaseModel):
 
 
 @dataclass
-class AgentSession:
+class RunState:
     """Estado de una corrida. Las herramientas solo operan sobre lo que hay acá."""
 
-    client: Any  # cliente para el clasificador
+    client: Any  # cliente para los subagentes
     model: str
     input_dir: Path
     output_dir: Path
     cache_dir: Path | None = None
-    max_api_calls: int = MAX_API_CALLS_PER_RUN
-    api_calls: int = 0
+    use_cache: bool = True  # False: ni lee ni escribe la caché de clasificaciones
+    budget: Budget = field(default_factory=Budget)
+    audit: AuditLog | None = None
     findings: dict[str, Finding] = field(default_factory=dict)
     snippets: dict[str, str] = field(default_factory=dict)
     classifications: dict[str, ClassificationResult] = field(default_factory=dict)
-    anonymized: list[str] = field(default_factory=list)
+    scanned: dict[str, list[str]] = field(default_factory=dict)  # archivo → IDs de sus hallazgos
+    anonymized: dict[str, str] = field(default_factory=dict)  # archivo → copia en output/
+    reports: dict[str, list[str]] = field(default_factory=dict)  # archivo → reportes en output/
 
 
 def resolve_input_path(raw: str, input_dir: Path) -> Path:
@@ -84,24 +71,37 @@ def resolve_input_path(raw: str, input_dir: Path) -> Path:
     return ruta
 
 
-def _ids_conocidos(session: AgentSession, ids: list[str]) -> list[str]:
+def _file_key(state: RunState, ruta: Path) -> str:
+    return ruta.relative_to(state.input_dir.resolve()).as_posix()
+
+
+def _scanned_path(state: RunState, raw: str) -> tuple[Path, str]:
+    ruta = resolve_input_path(raw, state.input_dir)
+    clave = _file_key(state, ruta)
+    if clave not in state.scanned:
+        raise ToolError("primero hay que correr scan_file sobre este archivo", outcome="rejected")
+    return ruta, clave
+
+
+def _ids_conocidos(state: RunState, ids: list[str]) -> list[str]:
     unicos = list(dict.fromkeys(ids))
-    desconocidos = [i for i in unicos if i not in session.findings]
+    desconocidos = [i for i in unicos if i not in state.findings]
     if desconocidos:
         raise ToolError(f"IDs desconocidos (usá los que devolvió scan_file): {len(desconocidos)}", outcome="rejected")
     return unicos
 
 
-def tool_scan_file(session: AgentSession, args: PathInput) -> dict[str, Any]:
-    ruta = resolve_input_path(args.path, session.input_dir)
+def tool_scan_file(state: RunState, args: PathInput) -> dict[str, Any]:
+    ruta = resolve_input_path(args.path, state.input_dir)
     try:
         hallazgos = scan_file(ruta)
     except ScanError as exc:
         raise ToolError(str(exc)) from exc
     textos = texts_by_location(ruta)
     for f in hallazgos:
-        session.findings[f.id] = f
-        session.snippets[f.id] = context_snippet(textos[(f.line, f.row, f.col)], f.start, f.end)
+        state.findings[f.id] = f
+        state.snippets[f.id] = context_snippet(textos[(f.line, f.row, f.col)], f.start, f.end)
+    state.scanned[_file_key(state, ruta)] = [f.id for f in hallazgos]
     return {
         "file": ruta.name,
         "count": len(hallazgos),
@@ -117,16 +117,16 @@ def tool_scan_file(session: AgentSession, args: PathInput) -> dict[str, Any]:
     }
 
 
-def tool_classify_findings(session: AgentSession, args: FindingIdsInput) -> dict[str, Any]:
+def tool_classify_findings(state: RunState, args: FindingIdsInput) -> dict[str, Any]:
+    """Invoca al agente Clasificador por hallazgo. `ApiBudgetExceeded` se propaga y corta la corrida."""
+    if not state.scanned:
+        raise ToolError("primero hay que correr scan_file", outcome="rejected")
     resultados = []
-    for fid in _ids_conocidos(session, args.finding_ids):
-        if session.api_calls >= session.max_api_calls:
-            raise ApiBudgetExceeded()
-        r = classify_finding(session.findings[fid], session.snippets[fid], session.client,
-                             model=session.model, cache_dir=session.cache_dir)
-        if not r.cached:
-            session.api_calls += 1
-        session.classifications[fid] = r
+    for fid in _ids_conocidos(state, args.finding_ids):
+        r = classify_finding(state.findings[fid], state.snippets[fid], state.client, model=state.model,
+                             cache_dir=state.cache_dir, use_cache=state.use_cache, budget=state.budget,
+                             audit=state.audit)
+        state.classifications[fid] = r
         c = r.classification
         resultados.append({
             "id": fid,
@@ -140,89 +140,31 @@ def tool_classify_findings(session: AgentSession, args: FindingIdsInput) -> dict
     return {"classified": resultados}
 
 
-def tool_recommend_actions(session: AgentSession, args: FindingIdsInput) -> dict[str, Any]:
-    ids = _ids_conocidos(session, args.finding_ids)
-    sin_clasificar = [i for i in ids if i not in session.classifications]
-    if sin_clasificar:
-        raise ToolError(f"hay {len(sin_clasificar)} hallazgos sin clasificar: usá classify_findings primero")
-    recomendaciones = []
-    for fid in ids:
-        c = session.classifications[fid].classification
-        accion = RECOMMENDED_ACTIONS[c.risk]
-        if c.needs_review:
-            accion += " (requiere revisión manual)"
-        recomendaciones.append({"id": fid, "risk": c.risk.value, "action": accion})
-    return {"recommendations": recomendaciones}
-
-
-def tool_anonymize(session: AgentSession, args: PathInput) -> dict[str, Any]:
-    ruta = resolve_input_path(args.path, session.input_dir)
+def tool_anonymize(state: RunState, args: PathInput) -> dict[str, Any]:
+    ruta, clave = _scanned_path(state, args.path)
     try:
         # overwrite=True: solo pisa una copia previa en output/; el original nunca se escribe.
-        destino = anonymize_file(ruta, session.output_dir, overwrite=True)
+        destino = anonymize_file(ruta, state.output_dir, overwrite=True)
     except (ScanError, AnonymizeError) as exc:
         raise ToolError(str(exc)) from exc
-    session.anonymized.append(destino.name)
+    state.anonymized[clave] = destino.name
     return {"status": "ok", "output_file": destino.name}
 
 
-def _schema(propiedades: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": propiedades,
-        "required": list(propiedades),
-        "additionalProperties": False,
-    }
-
-
-_PATH = {"path": {"type": "string", "description": "Nombre del archivo dentro del directorio de entrada."}}
-_IDS = {"finding_ids": {"type": "array", "items": {"type": "string"}, "description": "IDs devueltos por scan_file."}}
-
-
-@dataclass(frozen=True)
-class ToolSpec:
-    input_model: type[BaseModel]
-    handler: Callable[[AgentSession, Any], dict[str, Any]]
-    definition: dict[str, Any]
-
-
-def _spec(name: str, description: str, propiedades: dict[str, Any], input_model, handler) -> ToolSpec:
-    return ToolSpec(input_model, handler, {
-        "name": name, "description": description, "strict": True, "input_schema": _schema(propiedades),
-    })
-
-
-ALLOWED_TOOLS: dict[str, ToolSpec] = {
-    "scan_file": _spec("scan_file", "Escanea un archivo TXT o CSV y devuelve los hallazgos enmascarados con su ID.",
-                       _PATH, PathInput, tool_scan_file),
-    "classify_findings": _spec("classify_findings", "Clasifica con IA los hallazgos indicados (riesgo y sensibilidad).",
-                               _IDS, FindingIdsInput, tool_classify_findings),
-    "recommend_actions": _spec("recommend_actions", "Devuelve la acción recomendada para hallazgos ya clasificados.",
-                               _IDS, FindingIdsInput, tool_recommend_actions),
-    "anonymize": _spec("anonymize", "Genera una copia anonimizada del archivo en el directorio de salida.",
-                       _PATH, PathInput, tool_anonymize),
-}
-
-
-def tool_definitions() -> list[dict[str, Any]]:
-    return [spec.definition for spec in ALLOWED_TOOLS.values()]
-
-
-def run_tool(session: AgentSession, name: str, raw_input: Any) -> tuple[dict[str, Any], bool, str]:
-    """Ejecuta una herramienta pedida por el modelo. Devuelve (resultado, is_error, outcome).
-
-    `ApiBudgetExceeded` no se atrapa acá: corta la corrida en el loop del agente.
-    """
-    spec = ALLOWED_TOOLS.get(name)
-    if spec is None:
-        return {"error": "herramienta no permitida"}, True, "rejected"
+def tool_build_report(state: RunState, args: PathInput) -> dict[str, Any]:
+    ruta, clave = _scanned_path(state, args.path)
+    ids = state.scanned[clave]
+    pendientes = [i for i in ids if i not in state.classifications]
+    if pendientes:
+        raise ToolError(f"hay {len(pendientes)} hallazgos sin clasificar: usá classify_findings primero",
+                        outcome="rejected")
+    reporte = build_file_report(
+        ruta.name, [state.findings[i] for i in ids], state.classifications, model=state.model,
+        run_id=state.audit.run_id if state.audit else None, anonymized_file=state.anonymized.get(clave),
+    )
     try:
-        args = spec.input_model.model_validate(raw_input)
-    except ValidationError as exc:
-        # Solo campo y motivo: nunca se repite el valor que mandó el modelo.
-        detalle = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'input'}: {e['msg']}" for e in exc.errors())
-        return {"error": f"input inválido para {name}: {detalle}"}, True, "rejected"
-    try:
-        return spec.handler(session, args), False, "ok"
-    except ToolError as exc:
-        return {"error": str(exc)}, True, exc.outcome
+        archivos = write_file_report(reporte, state.output_dir)
+    except ReportError as exc:
+        raise ToolError(str(exc), outcome="rejected") from exc
+    state.reports[clave] = [a.name for a in archivos]
+    return {"report_files": state.reports[clave], "summary": reporte["summary"]}

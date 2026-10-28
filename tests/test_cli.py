@@ -64,8 +64,8 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
         tool_use_response("report_classification", {
             "is_sensitive": True, "risk": "high", "data_type": "credit_card",
             "confidence": 0.9, "explanation": "Tarjeta.", "needs_review": False}),
-        pedido("recommend_actions", {"finding_ids": [fid]}),
         pedido("anonymize", {"path": "pagos.txt"}),
+        pedido("build_report", {"path": "pagos.txt"}),
         text_response("1 hallazgo de riesgo alto. Copia: pagos.anonymized.txt"),
     ])
     monkeypatch.setattr(cli, "load_settings", lambda: _settings_de_prueba(tmp_path))
@@ -74,8 +74,11 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
 
     assert main(["agent", str(tmp_path / "in" / "pagos.txt")]) == 0
     salida = capsys.readouterr().out
-    assert "Estado: completed" in salida and "anonymize" in salida
+    assert "Estado: completed" in salida and "orchestrator → anonymize" in salida
+    assert "classifier: 1 hallazgos, 1 llamadas" in salida
+    assert "pagos.report.md" in salida
     assert (tmp_path / "out" / "pagos.anonymized.txt").exists()
+    assert (tmp_path / "out" / "pagos.report.json").exists()
     assert (tmp_path / "logs" / "audit.jsonl").exists()
     assert "1488" not in salida
 

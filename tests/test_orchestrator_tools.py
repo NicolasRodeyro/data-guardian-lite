@@ -1,0 +1,237 @@
+"""Herramientas del Orquestador y precondiciones de RunState (sin API)."""
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from guardian.agent_tools import RunState, resolve_input_path
+from guardian.agents.base import ApiBudgetExceeded, Budget, ToolError, execute_tool
+from guardian.agents.orchestrator import ORCHESTRATOR_TOOLS
+from guardian.classifier import TOOL_NAME
+from tests.conftest import FakeClient, tool_use_response
+
+MODEL = "claude-haiku-5-5"
+CONTENIDO = "Pago con 4539 1488 0343 6467\nCliente DNI 12.345.678\n"
+CRUDOS = ("1488 0343", "12.345.678")
+
+
+def _salida(**cambios) -> dict:
+    base = {"is_sensitive": True, "risk": "high", "data_type": "credit_card",
+            "confidence": 0.9, "explanation": "Explicación libre del modelo.", "needs_review": False}
+    base.update(cambios)
+    return base
+
+
+@pytest.fixture
+def state(tmp_path) -> RunState:
+    entrada = tmp_path / "in"
+    entrada.mkdir()
+    (entrada / "pagos.txt").write_text(CONTENIDO, encoding="utf-8")
+    cliente = FakeClient([tool_use_response(TOOL_NAME, _salida()),
+                          tool_use_response(TOOL_NAME, _salida(data_type="dni", risk="medium", needs_review=True))])
+    return RunState(client=cliente, model=MODEL, input_dir=entrada, output_dir=tmp_path / "out",
+                    cache_dir=tmp_path / "cache")
+
+
+def _run(state, name, entrada):
+    return execute_tool(ORCHESTRATOR_TOOLS, state, name, entrada)
+
+
+def _scan(state) -> list[str]:
+    resultado, es_error, _ = _run(state, "scan_file", {"path": "pagos.txt"})
+    assert not es_error
+    return [f["id"] for f in resultado["findings"]]
+
+
+def test_lista_blanca_del_orquestador():
+    assert list(ORCHESTRATOR_TOOLS) == ["scan_file", "classify_findings", "anonymize", "build_report"]
+    for t in ORCHESTRATOR_TOOLS.values():
+        assert t.definition["strict"] is True
+        assert t.definition["input_schema"]["additionalProperties"] is False
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("nombre", ["exportar_todo", "recommend_actions", "report_classification", "run_agent"])
+def test_herramienta_fuera_de_lista_se_rechaza_sin_ejecutar(state, nombre):
+    resultado, es_error, outcome = _run(state, nombre, {"destino": "../../secretos/clave.txt"})
+    assert es_error and outcome == "rejected"
+    assert "no permitida" in resultado["error"]
+    assert state.findings == {} and state.budget.calls == 0
+
+
+@pytest.mark.security
+def test_input_invalido_no_repite_el_valor_enviado(state):
+    resultado, es_error, outcome = _run(state, "scan_file", {"path": "pagos.txt", "nota": "4539 1488 0343 6467"})
+    assert es_error and outcome == "rejected"
+    assert "1488" not in json.dumps(resultado, ensure_ascii=False)
+
+
+def test_input_sin_campos_obligatorios(state):
+    _, es_error, outcome = _run(state, "classify_findings", {})
+    assert es_error and outcome == "rejected"
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("ruta", ["../secreto.txt", "../../secreto.txt", "sub/../../secreto.txt"])
+def test_sandbox_rechaza_salir_con_puntos_puntos(state, ruta):
+    (state.input_dir.parent / "secreto.txt").write_text("DNI 12.345.678\n", encoding="utf-8")
+    with pytest.raises(ToolError) as exc:
+        resolve_input_path(ruta, state.input_dir)
+    assert exc.value.outcome == "rejected"
+
+
+@pytest.mark.security
+def test_sandbox_rechaza_ruta_absoluta_externa(state):
+    secreto = state.input_dir.parent / "secreto.txt"
+    secreto.write_text("DNI 12.345.678\n", encoding="utf-8")
+    _, es_error, outcome = _run(state, "scan_file", {"path": str(secreto)})
+    assert es_error and outcome == "rejected"
+    assert state.findings == {}
+
+
+@pytest.mark.security
+def test_sandbox_rechaza_symlink_que_escapa(state):
+    secreto = state.input_dir.parent / "secreto.txt"
+    secreto.write_text("DNI 12.345.678\n", encoding="utf-8")
+    enlace = state.input_dir / "enlace.txt"
+    try:
+        os.symlink(secreto, enlace)
+    except (OSError, NotImplementedError):
+        pytest.skip("este sistema no permite crear symlinks sin privilegios")
+    with pytest.raises(ToolError):
+        resolve_input_path("enlace.txt", state.input_dir)
+
+
+def test_ruta_absoluta_dentro_del_sandbox_se_acepta(state):
+    assert resolve_input_path(str(state.input_dir / "pagos.txt"), state.input_dir).name == "pagos.txt"
+
+
+def test_archivo_inexistente(state):
+    _, es_error, outcome = _run(state, "scan_file", {"path": "no_existe.txt"})
+    assert es_error and outcome == "error"
+
+
+@pytest.mark.security
+def test_scan_devuelve_solo_datos_enmascarados(state):
+    resultado, _, _ = _run(state, "scan_file", {"path": "pagos.txt"})
+    texto = json.dumps(resultado, ensure_ascii=False)
+    assert resultado["count"] == 2
+    for crudo in CRUDOS:
+        assert crudo not in texto
+    assert state.scanned == {"pagos.txt": [f["id"] for f in resultado["findings"]]}
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("herramienta, entrada", [
+    ("classify_findings", {"finding_ids": ["pagos.txt:L1:9"]}),
+    ("anonymize", {"path": "pagos.txt"}),
+    ("build_report", {"path": "pagos.txt"}),
+])
+def test_runstate_exige_scan_file_primero(state, herramienta, entrada):
+    resultado, es_error, outcome = _run(state, herramienta, entrada)
+    assert es_error and outcome == "rejected"
+    assert "scan_file" in resultado["error"]
+    assert not (state.output_dir).exists()
+    assert state.client.calls == []
+
+
+@pytest.mark.security
+def test_build_report_exige_clasificar_todo(state):
+    ids = _scan(state)
+    _run(state, "classify_findings", {"finding_ids": ids[:1]})
+    resultado, es_error, outcome = _run(state, "build_report", {"path": "pagos.txt"})
+    assert es_error and outcome == "rejected" and "classify_findings" in resultado["error"]
+
+
+@pytest.mark.security
+def test_classify_no_devuelve_la_explicacion_libre(state):
+    ids = _scan(state)
+    resultado, es_error, _ = _run(state, "classify_findings", {"finding_ids": ids})
+    assert not es_error
+    assert "Explicación libre" not in json.dumps(resultado, ensure_ascii=False)
+    assert [c["risk"] for c in resultado["classified"]] == ["high", "medium"]
+    assert state.budget.calls == 2
+
+
+def test_classify_con_ids_desconocidos(state):
+    _scan(state)
+    _, es_error, outcome = _run(state, "classify_findings", {"finding_ids": ["inventado"]})
+    assert es_error and outcome == "rejected"
+
+
+def test_classify_deduplica_ids(state):
+    ids = _scan(state)
+    resultado, _, _ = _run(state, "classify_findings", {"finding_ids": [ids[0], ids[0]]})
+    assert len(resultado["classified"]) == 1
+
+
+def test_tope_de_llamadas_corta_la_corrida(state):
+    ids = _scan(state)
+    state.budget = Budget(max_calls=1)
+    with pytest.raises(ApiBudgetExceeded):
+        _run(state, "classify_findings", {"finding_ids": ids})
+    assert state.budget.calls == 1
+
+
+def test_cache_no_consume_presupuesto(state):
+    ids = _scan(state)
+    _run(state, "classify_findings", {"finding_ids": ids})
+    otro = RunState(client=FakeClient([]), model=MODEL, input_dir=state.input_dir,
+                    output_dir=state.output_dir, cache_dir=state.cache_dir)
+    _scan(otro)
+    _run(otro, "classify_findings", {"finding_ids": ids})
+    assert otro.budget.calls == 0
+
+
+def test_sin_cache_llama_a_la_api_y_no_escribe_la_cache(state):
+    ids = _scan(state)
+    _run(state, "classify_findings", {"finding_ids": ids})  # llena la caché
+    otro = RunState(client=FakeClient([tool_use_response(TOOL_NAME, _salida()),
+                                       tool_use_response(TOOL_NAME, _salida(data_type="dni", risk="medium"))]),
+                    model=MODEL, input_dir=state.input_dir, output_dir=state.output_dir,
+                    cache_dir=state.cache_dir, use_cache=False)
+    antes = sorted(p.read_text(encoding="utf-8") for p in state.cache_dir.glob("*.json"))
+    _scan(otro)
+    _run(otro, "classify_findings", {"finding_ids": ids})
+    assert otro.budget.calls == 2 and len(otro.client.calls) == 2
+    assert sorted(p.read_text(encoding="utf-8") for p in state.cache_dir.glob("*.json")) == antes
+
+
+@pytest.mark.security
+def test_anonymize_escribe_solo_en_salida_y_puede_repetirse(state):
+    _scan(state)
+    original = (state.input_dir / "pagos.txt").read_bytes()
+    for _ in range(2):
+        resultado, es_error, _ = _run(state, "anonymize", {"path": "pagos.txt"})
+        assert not es_error and resultado["output_file"] == "pagos.anonymized.txt"
+    assert (state.output_dir / "pagos.anonymized.txt").exists()
+    assert (state.input_dir / "pagos.txt").read_bytes() == original
+    assert str(state.output_dir) not in json.dumps(resultado)  # no revela rutas locales
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("herramienta", ["anonymize", "build_report"])
+def test_herramientas_de_salida_no_aceptan_rutas_de_salida(state, herramienta):
+    _scan(state)
+    _, es_error, outcome = _run(state, herramienta, {"path": "pagos.txt", "output_name": "../x.txt"})
+    assert es_error and outcome == "rejected"
+    assert not Path(state.output_dir.parent / "x.txt").exists()
+
+
+@pytest.mark.security
+def test_build_report_escribe_json_y_md_sin_crudos_ni_texto_libre(state):
+    ids = _scan(state)
+    _run(state, "classify_findings", {"finding_ids": ids})
+    _run(state, "anonymize", {"path": "pagos.txt"})
+    resultado, es_error, _ = _run(state, "build_report", {"path": "pagos.txt"})
+    assert not es_error
+    assert resultado["report_files"] == ["pagos.report.json", "pagos.report.md"]
+    assert resultado["summary"]["findings"] == 2 and resultado["summary"]["needs_review"] == 1
+    texto = "".join((state.output_dir / n).read_text(encoding="utf-8") for n in resultado["report_files"])
+    for crudo in CRUDOS:
+        assert crudo not in texto
+    assert "Explicación libre" not in texto
+    assert "pagos.anonymized.txt" in texto
+    assert "revisar y restringir el acceso (requiere revisión manual)" in texto

@@ -1,4 +1,4 @@
-"""Tests del loop del agente con FakeClient: ninguno llama a la API."""
+"""Tests del Orquestador con FakeClient: ninguno llama a la API."""
 
 import hashlib
 import json
@@ -9,8 +9,9 @@ from types import SimpleNamespace
 import anthropic
 import pytest
 
-from guardian.agent import run_agent
-from guardian.agent_tools import ALLOWED_TOOLS, AgentSession
+from guardian.agent_tools import RunState
+from guardian.agents.base import Budget
+from guardian.agents.orchestrator import ORCHESTRATOR_TOOLS, run_orchestrator
 from guardian.audit import AuditLog
 from guardian.classifier import TOOL_NAME
 from guardian.models import AuditEvent
@@ -46,19 +47,19 @@ def entorno(tmp_path):
     (entrada / "pagos.txt").write_text(CONTENIDO, encoding="utf-8")
     ids = [f.id for f in scan_file(entrada / "pagos.txt")]
     clasificador = FakeClient([_clasif(), _clasif(data_type="dni", risk="medium")])
-    session = AgentSession(client=clasificador, model=MODEL, input_dir=entrada,
-                           output_dir=tmp_path / "out", cache_dir=tmp_path / "cache")
     audit = AuditLog(path=tmp_path / "logs" / "audit.jsonl", run_id="r1")
-    return SimpleNamespace(tmp=tmp_path, entrada=entrada, ids=ids, session=session, audit=audit)
+    state = RunState(client=clasificador, model=MODEL, input_dir=entrada, output_dir=tmp_path / "out",
+                     cache_dir=tmp_path / "cache", audit=audit)
+    return SimpleNamespace(tmp=tmp_path, entrada=entrada, ids=ids, state=state, audit=audit)
 
 
 def _flujo_feliz(ids):
     return [
         _pedido(_bloque("scan_file", {"path": "pagos.txt"}, "t1")),
         _pedido(_bloque("classify_findings", {"finding_ids": ids}, "t2")),
-        _pedido(_bloque("recommend_actions", {"finding_ids": ids}, "t3")),
-        _pedido(_bloque("anonymize", {"path": "pagos.txt"}, "t4")),
-        text_response("2 hallazgos, 1 de riesgo alto. Copia: pagos.anonymized.txt"),
+        _pedido(_bloque("anonymize", {"path": "pagos.txt"}, "t3")),
+        _pedido(_bloque("build_report", {"path": "pagos.txt"}, "t4")),
+        text_response("2 hallazgos, 1 de riesgo alto. Reporte: pagos.report.md"),
     ]
 
 
@@ -67,40 +68,47 @@ def _eventos(e) -> list[AuditEvent]:
     return [AuditEvent.model_validate_json(linea) for linea in lineas]
 
 
-def _tool_results(cliente: FakeClient) -> list[dict]:
-    mensajes = cliente.calls[-1]["messages"]
-    return [b for m in mensajes if m["role"] == "user" and isinstance(m["content"], list) for b in m["content"]]
-
-
 def test_camino_feliz(entorno):
     e = entorno
-    agente = FakeClient(_flujo_feliz(e.ids))
-    r = run_agent(TAREA, agente, e.session, audit=e.audit)
-    assert r.status == "completed" and r.steps == 5
-    assert [c.tool for c in r.tool_calls] == ["scan_file", "classify_findings", "recommend_actions", "anonymize"]
+    r = run_orchestrator(TAREA, FakeClient(_flujo_feliz(e.ids)), e.state)
+    assert r.status == "completed" and r.steps == 5 and r.agent == "orchestrator"
+    assert [c.tool for c in r.tool_calls] == ["scan_file", "classify_findings", "anonymize", "build_report"]
     assert all(c.outcome == "ok" for c in r.tool_calls)
-    assert "pagos.anonymized.txt" in r.final_text
     assert (e.tmp / "out" / "pagos.anonymized.txt").exists()
-    assert e.session.api_calls == 5 + 2  # 5 vueltas del agente + 2 clasificaciones
-    assert [ev.tool for ev in _eventos(e)] == [c.tool for c in r.tool_calls]
+    assert (e.tmp / "out" / "pagos.report.json").exists() and (e.tmp / "out" / "pagos.report.md").exists()
+    assert e.state.budget.calls == 5 + 2  # 5 vueltas del Orquestador + 2 del Clasificador
     assert (r.input_tokens, r.output_tokens) == (100 * 4 + 10, 20 * 4 + 5)
 
 
-def test_request_del_agente_cumple_las_reglas(entorno):
+def test_auditoria_registra_que_agente_hizo_cada_cosa(entorno):
+    e = entorno
+    run_orchestrator(TAREA, FakeClient(_flujo_feliz(e.ids)), e.state)
+    pares = [(ev.agent, ev.tool) for ev in _eventos(e)]
+    assert pares == [
+        ("orchestrator", "scan_file"),
+        ("classifier", TOOL_NAME), ("classifier", TOOL_NAME),
+        ("orchestrator", "classify_findings"),
+        ("orchestrator", "anonymize"),
+        ("orchestrator", "build_report"),
+    ]
+    assert {ev.run_id for ev in _eventos(e)} == {"r1"}
+
+
+def test_request_del_orquestador_cumple_las_reglas(entorno):
     e = entorno
     agente = FakeClient(_flujo_feliz(e.ids))
-    run_agent(TAREA, agente, e.session, audit=e.audit)
+    run_orchestrator(TAREA, agente, e.state)
     pedido = agente.calls[0]
     assert not {"temperature", "top_p", "top_k"} & set(pedido)
     assert pedido["tool_choice"] == {"type": "auto"}
-    assert [t["name"] for t in pedido["tools"]] == list(ALLOWED_TOOLS)
+    assert [t["name"] for t in pedido["tools"]] == list(ORCHESTRATOR_TOOLS)
 
 
 def test_historial_reenvia_el_contenido_completo_y_un_mensaje_de_resultados(entorno):
     e = entorno
     respuestas = _flujo_feliz(e.ids)
     agente = FakeClient(list(respuestas))
-    run_agent(TAREA, agente, e.session, audit=e.audit)
+    run_orchestrator(TAREA, agente, e.state)
     segundo = agente.calls[1]["messages"]
     assert segundo[1] == {"role": "assistant", "content": respuestas[0].content}
     assert segundo[2]["role"] == "user" and segundo[2]["content"][0]["tool_use_id"] == "t1"
@@ -112,7 +120,7 @@ def test_herramientas_en_paralelo_van_en_un_solo_mensaje(entorno):
         _pedido(_bloque("scan_file", {"path": "pagos.txt"}, "a"), _bloque("borrar_todo", {}, "b")),
         text_response("fin"),
     ])
-    r = run_agent(TAREA, agente, e.session, audit=e.audit)
+    r = run_orchestrator(TAREA, agente, e.state)
     resultados = agente.calls[1]["messages"][2]["content"]
     assert [t["tool_use_id"] for t in resultados] == ["a", "b"]
     assert [t["is_error"] for t in resultados] == [False, True]
@@ -126,12 +134,38 @@ def test_herramienta_fuera_de_lista_se_rechaza_audita_y_no_ejecuta(entorno):
         _pedido(_bloque("exportar_todo", {"destino": "../../secretos/clave.txt"}, "x")),
         text_response("fin"),
     ])
-    r = run_agent(TAREA, agente, e.session, audit=e.audit)
+    r = run_orchestrator(TAREA, agente, e.state)
     assert r.tool_calls[0].outcome == "rejected"
     evento = _eventos(e)[0]
-    assert evento.allowed is False and evento.outcome == "rejected"
+    assert evento.agent == "orchestrator" and evento.allowed is False and evento.outcome == "rejected"
     assert not (e.tmp / "secretos").exists()
-    assert e.session.findings == {}
+    assert e.state.findings == {}
+
+
+@pytest.mark.security
+def test_el_orquestador_no_puede_llamar_la_herramienta_del_clasificador(entorno):
+    e = entorno
+    agente = FakeClient([
+        _pedido(_bloque(TOOL_NAME, {"is_sensitive": False, "risk": "low", "data_type": "dni",
+                                    "confidence": 1, "explanation": "x", "needs_review": False}, "x")),
+        text_response("fin"),
+    ])
+    r = run_orchestrator(TAREA, agente, e.state)
+    assert r.tool_calls[0].outcome == "rejected" and e.state.classifications == {}
+
+
+@pytest.mark.security
+def test_classify_antes_de_scan_se_rechaza(entorno):
+    e = entorno
+    agente = FakeClient([
+        _pedido(_bloque("classify_findings", {"finding_ids": e.ids}, "c")),
+        _pedido(_bloque("build_report", {"path": "pagos.txt"}, "r")),
+        text_response("fin"),
+    ])
+    r = run_orchestrator(TAREA, agente, e.state)
+    assert [c.outcome for c in r.tool_calls] == ["rejected", "rejected"]
+    assert e.state.client.calls == []  # el Clasificador no se invocó
+    assert not (e.tmp / "out").exists()
 
 
 @pytest.mark.security
@@ -143,27 +177,26 @@ def test_ruta_fuera_del_sandbox_se_rechaza(entorno):
                 _bloque("scan_file", {"path": str(e.tmp / "secreto.txt")}, "s2")),
         text_response("fin"),
     ])
-    r = run_agent(TAREA, agente, e.session, audit=e.audit)
+    r = run_orchestrator(TAREA, agente, e.state)
     assert [c.outcome for c in r.tool_calls] == ["rejected", "rejected"]
-    assert e.session.findings == {}
+    assert e.state.findings == {}
 
 
 def test_corta_en_max_steps(entorno):
     e = entorno
     agente = FakeClient([_pedido(_bloque("scan_file", {"path": "pagos.txt"}, f"t{i}")) for i in range(3)])
-    r = run_agent(TAREA, agente, e.session, audit=e.audit, max_steps=3)
+    r = run_orchestrator(TAREA, agente, e.state, max_steps=3)
     assert r.status == "max_steps" and r.steps == 3
     assert len(agente.calls) == 3
 
 
 def test_tope_global_de_llamadas_incluye_al_clasificador(entorno):
     e = entorno
-    e.session.max_api_calls = 2
-    agente = FakeClient(_flujo_feliz(e.ids))
-    r = run_agent(TAREA, agente, e.session, audit=e.audit)
+    e.state.budget = Budget(max_calls=2)
+    r = run_orchestrator(TAREA, FakeClient(_flujo_feliz(e.ids)), e.state)
     assert r.status == "api_budget"
-    assert e.session.api_calls == 2
-    assert e.session.client.calls == []  # el clasificador no llegó a llamar
+    assert e.state.budget.calls == 2
+    assert e.state.client.calls == []  # el Clasificador no llegó a llamar
 
 
 @pytest.mark.parametrize("respuesta, estado", [
@@ -172,20 +205,21 @@ def test_tope_global_de_llamadas_incluye_al_clasificador(entorno):
     (anthropic.APIConnectionError(request=None), "api_error"),
 ])
 def test_estados_de_corte(entorno, respuesta, estado):
-    e = entorno
-    r = run_agent(TAREA, FakeClient([respuesta]), e.session, audit=e.audit)
+    r = run_orchestrator(TAREA, FakeClient([respuesta]), entorno.state)
     assert r.status == estado
 
 
 @pytest.mark.security
-def test_ningun_tool_result_trae_valores_crudos(entorno):
+def test_ningun_tool_result_ni_salida_trae_valores_crudos(entorno):
     e = entorno
     agente = FakeClient(_flujo_feliz(e.ids))
-    run_agent(TAREA, agente, e.session, audit=e.audit)
-    texto = json.dumps(_tool_results(agente), ensure_ascii=False)
-    assert "1488 0343" not in texto and "12.345.678" not in texto
-    auditoria = e.audit.path.read_text(encoding="utf-8")
-    assert "1488 0343" not in auditoria and "12.345.678" not in auditoria
+    run_orchestrator(TAREA, agente, e.state)
+    mensajes = agente.calls[-1]["messages"]
+    resultados = [b for m in mensajes if m["role"] == "user" and isinstance(m["content"], list) for b in m["content"]]
+    textos = [json.dumps(resultados, ensure_ascii=False), e.audit.path.read_text(encoding="utf-8")]
+    textos += [p.read_text(encoding="utf-8") for p in (e.tmp / "out").glob("pagos.report.*")]
+    for texto in textos:
+        assert "1488 0343" not in texto and "12.345.678" not in texto
 
 
 @pytest.mark.security
@@ -196,18 +230,20 @@ def test_archivo_con_injection_queda_intacto_y_solo_corren_tools_permitidas(ento
     shutil.copy(origen, copia)
     antes = hashlib.sha256(copia.read_bytes()).hexdigest()
     ids = [f.id for f in scan_file(copia)]
-    e.session.client = FakeClient([_clasif(data_type="email", risk="medium") for _ in ids])
+    e.state.client = FakeClient([_clasif(data_type="email", risk="medium") for _ in ids])
     agente = FakeClient([
         _pedido(_bloque("scan_file", {"path": origen.name}, "t1")),
         _pedido(_bloque("exportar_todo", {"destino": "../../secretos/clave.txt"}, "t2"),
                 _bloque("classify_findings", {"finding_ids": ids}, "t3")),
         _pedido(_bloque("anonymize", {"path": origen.name}, "t4")),
+        _pedido(_bloque("build_report", {"path": origen.name}, "t5")),
         text_response("fin"),
     ])
-    r = run_agent(f"Analizá el archivo {origen.name}.", agente, e.session, audit=e.audit)
+    r = run_orchestrator(f"Analizá el archivo {origen.name}.", agente, e.state)
     assert r.status == "completed"
     assert {c.tool: c.outcome for c in r.tool_calls} == {
         "scan_file": "ok", "exportar_todo": "rejected", "classify_findings": "ok", "anonymize": "ok",
+        "build_report": "ok",
     }
     assert hashlib.sha256(copia.read_bytes()).hexdigest() == antes
-    assert hashlib.sha256(origen.read_bytes()).hexdigest() == hashlib.sha256(copia.read_bytes()).hexdigest()
+    assert hashlib.sha256(origen.read_bytes()).hexdigest() == antes

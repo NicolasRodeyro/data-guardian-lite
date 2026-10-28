@@ -211,3 +211,25 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
   - Contar `needs_review` como negativo: premiaría a un clasificador que duda.
   - Evaluar a nivel archivo: oculta qué tipos fallan.
 - **Consecuencias:** El recall del modo clasificador nunca supera al de las reglas; la IA solo puede mejorar la precisión. Un clasificador que manda todo a revisión no gana precisión, y eso es intencional: lo que se mide es cuánto filtra con seguridad.
+
+## ADR-026 — BaseAgent con herramienta de salida, reporte armado en código y retiro del agente v1
+- **Fecha:** 2026-10-27
+- **Estado:** Aceptada
+- **Contexto:** En el Paso 7 el agente único de la v1 (`agent.py`) pasa a la arquitectura multiagente. El loop, la lista blanca y la auditoría estaban en `agent.py`, y la llamada al Clasificador estaba suelta en `classifier.py`. Hacía falta una sola implementación de los controles para todos los agentes. También había que decidir cómo produce el reporte el Orquestador sin escribir texto libre del modelo.
+- **Decisión:**
+  - **Base común.** `guardian/agents/base.py` define `AgentSpec`, `BaseAgent`, `Budget` y `execute_tool`.
+    - Cada agente tiene su lista blanca, y `max_steps` va por agente.
+    - El `Budget` de llamadas es compartido por toda la corrida. Un hit de caché no lo consume, y cuando se agota corta todo, subagentes incluidos.
+    - Un agente puede declarar una **herramienta de salida**: sin handler, se valida con Pydantic y termina el loop. Si el modelo no la llama, la llama inválida o hay refusal, el agente que la usa aplica fail-closed.
+  - **Clasificador.** Es un `BaseAgent` de un paso cuya única herramienta es `report_classification`. `classify_finding` sigue siendo la interfaz pública y conserva la caché, el fallback y el piso de riesgo. Como el request es idéntico, la caché de la v1 sigue siendo válida.
+  - **Orquestador.** Usa `scan_file`, `classify_findings`, `anonymize` y `build_report`, sobre un `RunState` que impone el orden: `classify_findings`, `anonymize` y `build_report` exigen el archivo escaneado, y `build_report` exige además todo clasificado.
+  - **Reporte.** `build_report` lo arma en código (`guardian/report.py`, JSON y MD en `output/`), con la acción recomendada de la tabla fija.
+  - **Herramientas retiradas.** `recommend_actions` deja de ser una herramienta: se modifica en parte lo dicho en ADR-023, y las acciones van al reporte. Se elimina `agent.py`; la v1 queda en el tag `v1`.
+- **Alternativas descartadas:**
+  - Mantener `agent.py` como alias: duplica el loop y los controles.
+  - Que el modelo redacte el reporte o un resumen validado: es texto libre persistido, más superficie.
+  - Un `max_api_calls` por agente: no acota la corrida completa.
+- **Consecuencias:**
+  - Guardián y Revisor (Pasos 8 y 9) se suman como un `AgentSpec` más, con su propia herramienta de salida.
+  - La auditoría muestra qué agente hizo cada cosa: `orchestrator` o `classifier`.
+  - El resumen del Orquestador solo se muestra en consola. El reporte no depende del modelo.

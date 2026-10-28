@@ -11,7 +11,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - [X] Paso 6 — Evaluación v1: reglas vs. reglas+clasificador  ← hito entregable v1
 
 ## Fase B — Multiagente
-- [ ] Paso 7 — BaseAgent + Orquestador + Clasificador como agente + reporte final
+- [X] Paso 7 — BaseAgent + Orquestador + Clasificador como agente + reporte final
 - [ ] Paso 8 — Guardián (prompt injection) + heurística + RunState
 - [ ] Paso 9 — Revisor (solo dudosos) + conciliación
 
@@ -19,6 +19,25 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - [ ] Paso 10 — Evaluación completa: reglas / +clasificador / sistema completo + métricas del Guardián
 - [ ] Paso 11 — Streamlit
 - [ ] Cierre — README con instrucciones, arquitectura, resultados de eval y demo
+
+## Notas del Paso 7
+- `agents/base.py` (BaseAgent, Budget, herramienta de salida) + `classifier_agent.py` + `orchestrator.py` + `report.py`. `agent.py` eliminado (v1 en el tag `v1`). 233 unitarios verdes, 59 de seguridad. Skill de seguridad aplicada sin incumplimientos. ADR-026.
+- Pruebas reales con Haiku:
+  - Integración del Orquestador en verde.
+  - CLI `agent` sobre `instrucciones_proveedor.txt` (desde caché).
+  - Con `--no-cache` (opción nueva), sobre `logs_app.txt` (16/19 bien; los 3 "errores" son dudas con `needs_review`) y `config_integracion.txt` (12/12 critical). Total USD 0.012.
+- Commit del paso 7 hecho junto con el checkbox.
+
+## Mejoras para más adelante
+- Snippets hacia la API: hoy solo se enmascaran los 5 tipos detectados; nombres, teléfonos o direcciones del contexto (±40 caracteres) viajan en claro. Opciones: enmascarar nombres/números genéricos en el snippet o achicar el contexto. Mencionarlo en el README como limitación conocida.
+- **Hacer en el Paso 9, junto con el Revisor:** rúbrica de riesgo compartida entre Clasificador y Revisor, más concreta. Casos observados en el Paso 7:
+  - En `instrucciones_proveedor.txt`, 9 CUIT casi idénticos salieron 8 `medium` y 1 `high` (L3, conf 0.7), aunque ninguno tiene nombre al lado.
+  - En `config_integracion.txt`, el modelo usa `needs_review` como "requiere acción" en API keys con confianza alta.
+  - Qué hay que aclarar en el prompt:
+    - "CUIT/DNI sin nombre de persona ⇒ medium".
+    - `needs_review` = duda o indicio de manipulación, no "hay que actuar".
+  - Ajustar también el criterio de "dudoso" (hoy `confidence < 0.7`; L3 con 0.7 se escaparía).
+  - Cambiar `PROMPT_VERSION` invalida la caché: volver a correr la evaluación una sola vez, con todo ajustado.
 
 ## Notas / bloqueos
 - Paso 0 (commit 507ce3c): 21 tests verdes. La denegación de `.env` se verificó con la sesión de Claude Code que se negó a leerlo.

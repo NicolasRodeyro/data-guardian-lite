@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from guardian.agent import run_agent
-from guardian.agent_tools import AgentSession
+from guardian.agent_tools import RunState
+from guardian.agents.orchestrator import run_orchestrator
 from guardian.anonymizer import AnonymizeError, anonymize_file
 from guardian.audit import AuditLog
 from guardian.classifier import classify_file
@@ -21,7 +21,7 @@ SUBCOMANDOS: dict[str, tuple[str, int]] = {
     "scan": ("Escanea un archivo y muestra hallazgos enmascarados", 2),
     "anonymize": ("Genera una copia anonimizada en output/", 3),
     "classify": ("Clasifica hallazgos con Claude", 4),
-    "agent": ("Corre el agente orquestador sobre un archivo", 5),
+    "agent": ("Corre el Orquestador (y sus subagentes) sobre un archivo", 7),
     "eval": ("Evalúa reglas vs. IA contra data/synthetic", 6),
 }
 
@@ -78,23 +78,31 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         print(f"Error: el archivo tiene que estar dentro de {settings.input_dir}", file=sys.stderr)
         return 1
     client = get_client(settings)
-    session = AgentSession(client=client, model=settings.anthropic_model,
-                           input_dir=settings.input_dir, output_dir=settings.output_dir)
     audit = AuditLog(path=settings.logs_dir / "audit.jsonl")
+    state = RunState(client=client, model=settings.anthropic_model, input_dir=settings.input_dir,
+                     output_dir=settings.output_dir, audit=audit, use_cache=not args.no_cache)
     tarea = f"Analizá el archivo {ruta.relative_to(base).as_posix()}."
-    r = run_agent(tarea, client, session, audit=audit)
+    r = run_orchestrator(tarea, client, state)
 
+    clasif = list(state.classifications.values())
+    llamadas_clasificador = sum(1 for c in clasif if not c.cached)
     for llamada in r.tool_calls:
-        print(f"paso {llamada.step}: {llamada.tool:<18} → {llamada.outcome}")
+        extra = ""
+        if llamada.tool == "classify_findings" and llamada.outcome == "ok":
+            en_cache = len(clasif) - llamadas_clasificador
+            extra = f"  (classifier: {len(clasif)} hallazgos, {llamadas_clasificador} llamadas"
+            extra += f", {en_cache} desde caché)" if en_cache else ")"
+        print(f"paso {llamada.step}: {llamada.agent} → {llamada.tool:<18} → {llamada.outcome}{extra}")
     print(f"\nEstado: {r.status} ({r.steps} pasos)")
     if r.final_text:
         print(f"\n{r.final_text}\n")
-    clasif = list(session.classifications.values())
+    for archivos in state.reports.values():
+        print("Reporte: " + ", ".join(str(settings.output_dir / a) for a in archivos))
     tokens_in = r.input_tokens + sum(c.input_tokens for c in clasif)
     tokens_out = r.output_tokens + sum(c.output_tokens for c in clasif)
     costo = estimate_cost(settings.anthropic_model, tokens_in, tokens_out)
     costo_txt = f"USD {costo:.4f}" if costo is not None else "costo desconocido para este modelo"
-    print(f"{session.api_calls} llamadas a {settings.anthropic_model} · {tokens_in} tokens de entrada, "
+    print(f"{state.budget.calls} llamadas a {settings.anthropic_model} · {tokens_in} tokens de entrada, "
           f"{tokens_out} de salida · {costo_txt}")
     print(f"Auditoría: {audit.path} (run_id {audit.run_id})")
     return 0 if r.status == "completed" else 1
@@ -138,6 +146,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("ruta", nargs="?", help="archivo de entrada (dentro de data/)")
         if nombre == "anonymize":
             p.add_argument("--overwrite", action="store_true", help="reemplaza la copia si ya existe")
+        if nombre == "agent":
+            p.add_argument("--no-cache", action="store_true",
+                           help="clasifica todo con la API, sin leer ni escribir la caché")
     return parser
 
 
