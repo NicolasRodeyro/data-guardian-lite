@@ -4,7 +4,7 @@ import pytest
 
 from guardian.config import load_settings
 from guardian.llm import get_client
-from guardian.models import Review
+from guardian.models import Classification, Review
 from guardian.review import review_finding
 from guardian.scanner import scan_text
 
@@ -23,7 +23,10 @@ def test_revision_real(tmp_path, linea, tipo, riesgo):
     if not settings.anthropic_api_key:
         pytest.skip("No hay ANTHROPIC_API_KEY configurada")
     hallazgo = next(f for f in scan_text(linea, "a.txt", line=1) if f.data_type.value == tipo)
-    r = review_finding(hallazgo, linea, get_client(settings), model=settings.anthropic_model,
+    # el Clasificador "se equivocó" y dijo low con poca confianza: el Revisor tiene que corregirlo
+    erronea = Classification(is_sensitive=False, risk="low", data_type=tipo, confidence=0.5,
+                             explanation="Parece un dato de prueba.", needs_review=False)
+    r = review_finding(hallazgo, linea, erronea, get_client(settings), model=settings.anthropic_model,
                        cache_dir=tmp_path / "rcache", use_cache=False)
     assert isinstance(r.review, Review), r.fallback_reason
     print(f"\n{tipo}: {r.review.model_dump(mode='json')}")

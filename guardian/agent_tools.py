@@ -8,7 +8,8 @@ Reglas que se cumplen acá:
   inspección del Guardián; `review_findings`, todos los hallazgos clasificados, y `build_report`,
   todos clasificados y los dudosos revisados.
 - Qué hallazgos son dudosos lo decide `risk.is_doubtful`, no el Orquestador: `review_findings`
-  recibe solo el archivo. Volver a clasificar un hallazgo descarta su revisión (ADR-028).
+  recibe solo el archivo. Dudoso = archivo sospechoso o confianza baja (ADR-029). Volver a
+  clasificar un hallazgo descarta su revisión (ADR-028).
 - Archivo `suspicious` ⇒ el código fuerza `needs_review=True` en todos sus hallazgos (ADR-027).
 - Ningún resultado trae texto crudo del archivo: solo IDs, tipos, valores enmascarados y
   campos estructurados. La explicación libre del Clasificador no vuelve al Orquestador.
@@ -176,10 +177,14 @@ def tool_classify_findings(state: RunState, args: FindingIdsInput) -> dict[str, 
     return {"classified": resultados}
 
 
+def _suspicious(state: RunState, fid: str) -> bool:
+    return state.inspections[state.finding_file[fid]].verdict.suspicious
+
+
 def _pending_reviews(state: RunState, ids: list[str]) -> list[str]:
     """Dudosos sin revisar. Los fallbacks no se revisan: ya quedaron en `high` y a revisión."""
     return [i for i in ids if i not in state.reviews and state.classifications[i].fallback_reason is None
-            and is_doubtful(state.classifications[i].classification)]
+            and is_doubtful(state.classifications[i].classification, suspicious=_suspicious(state, i))]
 
 
 def tool_review_findings(state: RunState, args: PathInput) -> dict[str, Any]:
@@ -194,7 +199,8 @@ def tool_review_findings(state: RunState, args: PathInput) -> dict[str, Any]:
     resultados = []
     for fid in _pending_reviews(state, ids):
         actual = state.classifications[fid]
-        rev = review_finding(state.findings[fid], state.snippets[fid], state.client, model=state.model,
+        rev = review_finding(state.findings[fid], state.snippets[fid], actual.classification, state.client,
+                             model=state.model, suspicious=_suspicious(state, fid),
                              cache_dir=state.review_cache_dir, use_cache=state.use_cache, budget=state.budget,
                              audit=state.audit)
         final, coinciden = reconcile(actual.classification, rev.review, state.findings[fid].data_type)

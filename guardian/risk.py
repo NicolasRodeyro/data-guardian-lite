@@ -3,7 +3,7 @@
 - Piso de riesgo por tipo validado (ADR-010): la IA no puede rebajar hallazgos fuertes. El
   scanner solo reporta tarjetas que pasan Luhn y CUIT con dígito verificador correcto, así que
   el piso se aplica a todo hallazgo de esos tipos.
-- Selección de dudosos y conciliación con el Revisor (ADR-013, ADR-015): las decide el
+- Selección de dudosos y conciliación con el Revisor (ADR-013, ADR-029): las decide el
   código, no el Orquestador ni el modelo.
 - Heurística de prompt injection (ADR-014): piso del Guardián. Si salta, el archivo es
   sospechoso aunque el modelo diga que no.
@@ -37,14 +37,15 @@ def apply_risk_floor(classification: Classification, rule_type: DataType) -> tup
     return classification.model_copy(update={"risk": piso, "is_sensitive": True, "needs_review": True}), True
 
 
-def is_doubtful(classification: Classification, threshold: float = CONFIDENCE_THRESHOLD) -> bool:
-    """Hallazgo que pasa por el Revisor: riesgo medio o confianza hasta el umbral (inclusive)."""
-    return classification.risk == RiskLevel.MEDIUM or classification.confidence <= threshold
+def is_doubtful(classification: Classification, *, suspicious: bool = False,
+                threshold: float = CONFIDENCE_THRESHOLD) -> bool:
+    """Hallazgo que pasa por el Revisor (ADR-029): archivo sospechoso o confianza hasta el umbral (inclusive)."""
+    return suspicious or classification.confidence <= threshold
 
 
 def reconcile(classification: Classification, review: Review | None,
               rule_type: DataType) -> tuple[Classification, bool]:
-    """Concilia Clasificador y Revisor (ADR-015). Devuelve (clasificación final, coinciden).
+    """Concilia Clasificador y Revisor (ADR-029). Devuelve (clasificación final, coinciden).
 
     - Revisor falló ⇒ a revisión (fail-closed).
     - Discrepan en sensibilidad, riesgo o tipo ⇒ a revisión.

@@ -31,7 +31,7 @@ Analizá el archivo que te indiquen usando tus herramientas, en este orden:
 1. scan_file con el nombre del archivo.
 2. inspect_file con el mismo archivo (el Guardián busca prompt injection).
 3. classify_findings con los IDs de todos los hallazgos (si no hay hallazgos, salteá este paso).
-4. review_findings con el mismo archivo (el Revisor da una segunda opinión sobre los dudosos).
+4. review_findings con el mismo archivo (el Revisor verifica la clasificación de los dudosos).
 5. anonymize con el mismo archivo.
 6. build_report con el mismo archivo.
 

@@ -124,7 +124,7 @@ def _r(risk="medium", sensible=True, tipo="dni", confianza=0.8):
 
 
 @pytest.mark.parametrize("clasif, dudoso", [
-    (_c("medium", 0.99), True),
+    (_c("medium", 0.99), False),  # el riesgo medio ya no alcanza (ADR-029)
     (_c("high", 0.7), True),   # el umbral es inclusivo
     (_c("high", 0.71), False),
     (_c("low", 0.5), True),
@@ -132,6 +132,12 @@ def _r(risk="medium", sensible=True, tipo="dni", confianza=0.8):
 ])
 def test_is_doubtful(clasif, dudoso):
     assert is_doubtful(clasif) is dudoso
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("clasif", [_c("critical", 0.99), _c("low", 0.95, sensible=False)])
+def test_archivo_sospechoso_hace_dudoso_cualquier_hallazgo(clasif):
+    assert is_doubtful(clasif, suspicious=True)
 
 
 def test_coinciden_no_cambia_nada():

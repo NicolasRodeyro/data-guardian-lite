@@ -19,12 +19,17 @@ RISK_RUBRIC = """Criterio de riesgo:
   junto al nombre de una persona.
 - critical: credenciales o secretos (API keys, tokens, contraseñas)."""
 
-_UNTRUSTED_TAG = re.compile(r"</?\s*untrusted_data\s*>", re.IGNORECASE)
+_RESERVED_TAGS = re.compile(r"</?\s*(untrusted_data|classifier_output)\s*>", re.IGNORECASE)
+
+
+def neutralize_tags(text: str) -> str:
+    """Saca las etiquetas que delimitan datos: un texto no puede abrirlas ni cerrarlas."""
+    return _RESERVED_TAGS.sub("[etiqueta removida]", text)
 
 
 def finding_content(finding: Finding, snippet: str, instruction: str) -> str:
-    """Mensaje con un hallazgo enmascarado. El snippet no puede abrir ni cerrar la etiqueta untrusted."""
-    contexto = _UNTRUSTED_TAG.sub("[etiqueta removida]", snippet)
+    """Mensaje con un hallazgo enmascarado. El snippet no puede abrir ni cerrar las etiquetas de datos."""
+    contexto = neutralize_tags(snippet)
     return (
         f"Tipo detectado por las reglas: {finding.data_type.value}\n"
         f"Valor enmascarado: {finding.masked_value}\n"

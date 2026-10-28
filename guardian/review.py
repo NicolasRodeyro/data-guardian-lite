@@ -1,8 +1,9 @@
 """Revisión de hallazgos dudosos: caché y fail-closed alrededor del agente Revisor.
 
 Flujo de `review_finding`: caché → agente Revisor (`agents/reviewer_agent.py`) → `ReviewResult`.
-Si el Revisor falla, `review` queda en None y la conciliación (`risk.reconcile`) manda el
-hallazgo a revisión manual. Qué se revisa y cómo se concilia lo decide `agent_tools.py`.
+El Revisor recibe el hallazgo enmascarado y la respuesta del Clasificador (ADR-029). Si falla,
+`review` queda en None y la conciliación (`risk.reconcile`) manda el hallazgo a revisión manual.
+Qué se revisa y cómo se concilia lo decide `agent_tools.py`.
 """
 
 from __future__ import annotations
@@ -20,9 +21,9 @@ from guardian.agents.reviewer_agent import build_user_content, reviewer_agent
 from guardian.audit import AuditLog
 from guardian.config import Settings
 from guardian.masking import mask_text
-from guardian.models import Finding, Review
+from guardian.models import Classification, Finding, Review
 
-PROMPT_VERSION = "v1"  # forma parte de la clave de caché
+PROMPT_VERSION = "v2"  # forma parte de la clave de caché
 DEFAULT_CACHE_DIR = Settings().output_dir / ".cache" / "reviews"
 
 
@@ -44,10 +45,12 @@ class ReviewResult:
         return "agree" if self.agrees else "disagree"
 
 
-def _cache_key(finding: Finding, snippet: str, model: str) -> str:
+def _cache_key(finding: Finding, snippet: str, classification: Classification, suspicious: bool,
+               model: str) -> str:
     material = json.dumps(
         {"v": PROMPT_VERSION, "model": model, "type": finding.data_type.value,
-         "masked": finding.masked_value, "snippet": snippet},
+         "masked": finding.masked_value, "snippet": snippet, "suspicious": suspicious,
+         "classification": classification.model_dump(mode="json", exclude={"needs_review"})},
         sort_keys=True, ensure_ascii=False,
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -66,23 +69,27 @@ def _cache_read(cache_dir: Path, key: str) -> Review | None:
 def review_finding(
     finding: Finding,
     snippet: str,
+    classification: Classification,
     client: Any,
     *,
     model: str,
+    suspicious: bool = False,
     cache_dir: Path | None = None,
     use_cache: bool = True,
     budget: Budget | None = None,
     audit: AuditLog | None = None,
 ) -> ReviewResult:
-    """Segunda opinión ciega sobre un hallazgo. `ApiBudgetExceeded` se propaga y corta la corrida."""
+    """Verifica la respuesta del Clasificador sobre un hallazgo. `ApiBudgetExceeded` se propaga."""
     snippet = mask_text(snippet)  # no se confía en quien llama
+    # la explicación es texto libre de otro modelo: también se enmascara antes de viajar
+    classification = classification.model_copy(update={"explanation": mask_text(classification.explanation)})
     cache_dir = cache_dir or DEFAULT_CACHE_DIR
-    clave = _cache_key(finding, snippet, model)
+    clave = _cache_key(finding, snippet, classification, suspicious, model)
     if use_cache and (hit := _cache_read(cache_dir, clave)) is not None:
         return ReviewResult(finding, hit, model, cached=True)
 
     r = reviewer_agent(client, model=model, budget=budget or Budget(max_calls=1), audit=audit).run(
-        build_user_content(finding, snippet))
+        build_user_content(finding, snippet, classification, suspicious))
     if r.status == "api_budget":
         raise ApiBudgetExceeded()
     if r.status != "output" or not isinstance(r.output, Review):

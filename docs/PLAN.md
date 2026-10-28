@@ -116,7 +116,7 @@ description: Revisión de controles de seguridad de Data Guardian. Usar SIEMPRE 
 | **Orquestador** | Recibe la tarea, coordina a los demás agentes (tool use) y arma el reporte final | `scan_file`, `inspect_file` (→ Guardián), `classify_findings` (→ Clasificador), `review_findings` (→ Revisor), `anonymize`, `build_report` | Resumen final + reporte generado en código |
 | **Guardián** | Detecta intentos de prompt injection en el contenido **antes** de clasificar; si detecta uno marca el archivo como `suspicious` | `report_injection` (solo salida estructurada) | `InjectionVerdict(suspicious, evidence_type, confidence)` |
 | **Clasificador** | Clasifica cada hallazgo con salida estructurada | `report_classification` | `Classification(is_sensitive, risk, data_type, confidence, explanation, needs_review)` |
-| **Revisor** | Audita **solo** los hallazgos dudosos; si no coincide con el Clasificador → `needs_review` | `report_review` | `Review(is_sensitive, risk, data_type, confidence)` |
+| **Revisor** | Audita **solo** los hallazgos dudosos: ve la entrada y la salida del Clasificador y verifica su respuesta; si no coincide → `needs_review` (ver "Modificaciones al plan") | `report_review` | `Review(is_sensitive, risk, data_type, confidence)` |
 
 La **anonimización no es un agente**: es una tool determinística (`anonymizer.py`) que el Orquestador puede invocar, sujeta al sandbox de rutas.
 
@@ -138,7 +138,8 @@ Orquestador (tool use)
        suspicious ⇒ el código marca el archivo y fuerza needs_review en sus hallazgos
   3. classify_findings(file_id) → Clasificador por hallazgo                [agente]
   4. review_findings(file_id)   → Revisor SOLO sobre los dudosos           [agente]
-       dudoso = risk == medium  o  confidence < CONFIDENCE_THRESHOLD (código, no el modelo)
+       dudoso = archivo suspicious  o  confidence <= CONFIDENCE_THRESHOLD (código, no el modelo)
+       el Revisor ve el hallazgo enmascarado + la respuesta del Clasificador
        sin coincidencia ⇒ needs_review=True
   5. anonymize(path)            → output/<nombre>.anonymized.<ext>         [determinístico]
   6. build_report()             → reporte JSON + MD armado en código desde el estado
@@ -173,7 +174,7 @@ El detalle completo de cada una va en `docs/DECISIONS.md`. Abajo, la lista de lo
    - **Revisar `stop_reason`:** si es `refusal` o `max_tokens`, se aplica el fallback.
    - **`output_config={"effort":"low"}`** en Clasificador y Guardián, para ahorrar tokens.
 4. **Loop manual propio** (base común), no el Tool Runner del SDK, para que cada llamada pase por la lista blanca, el contador de pasos y la auditoría.
-5. **Revisor ciego:** audita sin ver el veredicto del Clasificador, para que no se ancle. La comparación la hace el código.
+5. ~~**Revisor ciego:** audita sin ver el veredicto del Clasificador, para que no se ancle.~~ **Revisor auditor** (ADR-029): ve la entrada y la salida del Clasificador y verifica su respuesta. La comparación la sigue haciendo el código.
 6. **Caché** de clasificaciones y revisiones en `output/.cache/` (clave: agente + modelo + versión de prompt + hash del input enmascarado), con registro de `usage` para estimar el costo.
 7. **Límite de la evaluación:** la IA solo filtra lo que ya detectaron las reglas. Por eso el recall máximo es el de las reglas, y lo esperable es que la IA mejore la precisión y baje los falsos positivos. El Guardián se mide aparte, a nivel archivo.
 8. **Entrega incremental:** un solo agente primero (v1), multiagente después, sin romper lo entregable.
@@ -399,8 +400,8 @@ Cronograma tentativo: **lunes** 0–3 · **martes** 4–6 (hito v1 entregable) �
   - Fallo/refusal del Guardián ⇒ `suspicious`.
 
 #### Paso 9: Revisor
-- `reviewer.py`: system prompt + tool `report_review`; recibe el mismo input enmascarado que el Clasificador pero **no** su veredicto (revisor ciego).
-- Se suma `review_findings` al Orquestador. El código selecciona los dudosos: `risk == medium` o `confidence < CONFIDENCE_THRESHOLD` (default 0.7, en `config.py`).
+- `reviewer.py`: system prompt + tool `report_review`; recibe el mismo input enmascarado que el Clasificador ~~pero **no** su veredicto (revisor ciego)~~ **y también su respuesta** (modificado por ADR-029).
+- Se suma `review_findings` al Orquestador. El código selecciona los dudosos: ~~`risk == medium`~~ **archivo sospechoso** o `confidence <= CONFIDENCE_THRESHOLD` (default 0.7, en `config.py`; modificado por ADR-029).
 - Conciliación en `risk.py`: discrepancia en `is_sensitive` o `risk` ⇒ `needs_review=True`; riesgo final = máximo de ambos y del piso.
 - **Tests:**
   - Solo se revisan los dudosos (los `high`/`critical` con confianza alta no generan llamada).
@@ -565,3 +566,25 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 7. `ANTHROPIC_MODEL=claude-sonnet-5-5 python -m guardian.cli eval --mode all`: aparece `output/eval_report.md` con los tres modos y las métricas del Guardián.
 8. `streamlit run app.py`: recorrer el flujo completo.
 9. `docs/PROGRESS.md` queda con todos los pasos marcados y `docs/DECISIONS.md` refleja las decisiones tomadas en el camino.
+
+---
+
+## Modificaciones al plan
+
+Cambios respecto del plan original, decididos durante la implementación. El detalle de cada uno está en `docs/DECISIONS.md`.
+
+### 2026-10-28 — Revisor: criterio de entrada y qué ve (ADR-029, reemplaza ADR-015)
+- **Origen:** consejo recibido sobre el proyecto, más el resultado de la corrida del Paso 9: con "`medium` o confianza baja" el Revisor revisó 18 de 18 hallazgos y no cambió ninguno.
+- **Antes:**
+  - dudoso = `risk == medium` o `confidence < 0.7`;
+  - el Revisor era ciego: no veía la respuesta del Clasificador.
+- **Ahora:**
+  - dudoso = **archivo sospechoso** (según el Guardián) o `confidence <= 0.7`;
+  - el Revisor ve **la entrada y la salida** del Clasificador (en `<classifier_output>`, con la explicación enmascarada) y verifica si su respuesta es correcta;
+  - si el archivo es sospechoso, se le avisa que el Clasificador pudo haber sido manipulado.
+- **Sin cambios:**
+  - la conciliación en código (riesgo máximo, piso, `needs_review` nunca se apaga), así que el Revisor no puede bajar un riesgo;
+  - qué se revisa lo sigue eligiendo el código y no el Orquestador.
+- **A medir en el Paso 10:**
+  - si el Revisor se ancla en la respuesta del Clasificador;
+  - si la confianza que reporta el modelo realmente baja cuando se equivoca.

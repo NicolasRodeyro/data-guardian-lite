@@ -46,8 +46,9 @@ def entorno(tmp_path):
     entrada.mkdir()
     (entrada / "pagos.txt").write_text(CONTENIDO, encoding="utf-8")
     ids = [f.id for f in scan_file(entrada / "pagos.txt")]
-    # el DNI sale "medium" ⇒ es dudoso y pasa por el Revisor
-    subagentes = FakeClient([_guardian(), _clasif(), _clasif(data_type="dni", risk="medium"), _revision()])
+    # el DNI sale con confianza 0.6 ⇒ es dudoso y pasa por el Revisor
+    subagentes = FakeClient([_guardian(), _clasif(), _clasif(data_type="dni", risk="medium", confidence=0.6),
+                             _revision()])
     audit = AuditLog(path=tmp_path / "logs" / "audit.jsonl", run_id="r1")
     state = RunState(client=subagentes, model=MODEL, input_dir=entrada, output_dir=tmp_path / "out",
                      cache_dir=tmp_path / "cache", guardian_cache_dir=tmp_path / "gcache",

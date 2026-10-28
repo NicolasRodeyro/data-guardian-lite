@@ -44,8 +44,24 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - 346 unitarios verdes, 120 de seguridad. Skill de seguridad aplicada sin incumplimientos.
 - Integración real con Haiku: Revisor 3/3 con el riesgo de la rúbrica (CUIT sin nombre `medium`, DNI con nombre `high`, tarjeta `high`); Orquestador en verde.
 - CLI `--no-cache` sobre `instrucciones_proveedor.txt`: los 9 CUIT ahora salen todos `medium` (antes 8 + 1 `high`); 18/18 dudosos revisados, 0 discrepancias; 43 llamadas, USD 0.0135.
-- Para el Paso 10: con "todo `medium` es dudoso" el Revisor revisó el 100 % y no cambió nada. Si la evaluación muestra que no encuentra errores reales, achicar el criterio a solo baja confianza.
+- ~~Para el Paso 10: con "todo `medium` es dudoso" el Revisor revisó el 100 % y no cambió nada. Si la evaluación muestra que no encuentra errores reales, achicar el criterio a solo baja confianza.~~ Resuelto en el ajuste de abajo.
 - Commit del paso 9 hecho junto con el checkbox.
+
+### Ajuste posterior al Paso 9 — Revisor auditor (ADR-029, ver "Modificaciones al plan" en PLAN.md)
+- Cambio a partir de un consejo recibido:
+  - dudoso = archivo sospechoso o `confidence <= 0.7` (sale `medium`);
+  - el Revisor ve la entrada **y la salida** del Clasificador (en `<classifier_output>`, con la explicación enmascarada) y se le avisa si el archivo es sospechoso;
+  - la conciliación en código no cambia.
+- La caché del Revisor pasa a `v2`.
+- 355 unitarios verdes, 125 de seguridad, pyflakes limpio. Skill de seguridad aplicada sin incumplimientos.
+- Tests nuevos:
+  - un archivo sospechoso hace dudoso cualquier hallazgo;
+  - `medium` con confianza alta no se revisa;
+  - el Revisor recibe la respuesta del Clasificador;
+  - la explicación viaja enmascarada y no puede cerrar las etiquetas;
+  - otra clasificación no usa la caché.
+- Integración real con Haiku, 4/4 verdes. Con una clasificación equivocada a propósito (`low`, 0.5, "dato de prueba"), el Revisor la corrigió en los 3 casos: CUIT sin nombre `medium`, DNI con nombre `high`, tarjeta `high`. No se ancló. El Orquestador completó el flujo.
+- A medir en el Paso 10: anclaje del Revisor y si la confianza baja coincide con errores reales.
 
 ## Mejoras para más adelante
 - Snippets hacia la API: hoy solo se enmascaran los 5 tipos detectados; nombres, teléfonos o direcciones del contexto (±40 caracteres) viajan en claro. Opciones: enmascarar nombres/números genéricos en el snippet o achicar el contexto. Mencionarlo en el README como limitación conocida.

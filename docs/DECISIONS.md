@@ -117,7 +117,7 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 
 ## ADR-015 — Revisor ciego, conciliación en código
 - **Fecha:** 2026-10-26
-- **Estado:** Aceptada
+- **Estado:** Reemplazada por ADR-029
 - **Contexto:** Si el Revisor ve el veredicto del Clasificador tiende a confirmarlo.
 - **Decisión:** El Revisor no ve el veredicto del Clasificador; discrepancia ⇒ `needs_review`; riesgo final = máximo.
 - **Alternativas descartadas:** Revisor que ve y "corrige" al Clasificador; votación.
@@ -260,7 +260,7 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
 
 ## ADR-028 — Revisor ciego sobre los dudosos, conciliación en código y rúbrica compartida
 - **Fecha:** 2026-10-28
-- **Estado:** Aceptada
+- **Estado:** Reemplazada por ADR-029 en el criterio de dudoso y en lo que ve el Revisor (sigue vigente el resto: orden, conciliación, rúbrica y reporte)
 - **Contexto:** El Clasificador a veces duda o es inconsistente. En el Paso 7, 9 CUIT casi idénticos salieron 8 `medium` y 1 `high` con confianza 0,7, y `needs_review` se usaba como "requiere acción". ADR-013 y ADR-015 ya fijaban que el código elige qué se revisa y que el Revisor es ciego; faltaba definir el criterio concreto, qué pasa cuando vuelve a clasificarse un hallazgo y cómo se unifica el criterio de riesgo.
 - **Decisión:**
   - **Agente.** El Revisor (`agents/reviewer_agent.py`) es de un paso y su única herramienta es la de salida, `report_review` → `Review`. No tiene efectos. Recibe el mismo input enmascarado que el Clasificador, pero no su veredicto. La caché, el fail-closed y el `ReviewResult` viven en `review.py`, con caché propia en `output/.cache/reviews`.
@@ -284,3 +284,26 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
   - Una llamada extra por cada hallazgo dudoso, en general DNI, CUIT y emails `medium`.
   - Las discrepancias por ruido del modelo terminan en revisión manual, con más `needs_review`.
   - La evaluación del Paso 10 tiene que volver a correrse una sola vez, con la caché `v2`.
+
+## ADR-029 — El Revisor audita la respuesta del Clasificador y entra por archivo sospechoso o confianza baja
+- **Fecha:** 2026-10-28
+- **Estado:** Aceptada (reemplaza ADR-015 y, en parte, ADR-028)
+- **Contexto:** Con ADR-028, el criterio "`risk == medium` o confianza ≤ 0,7" hizo que el Revisor revisara 18 de 18 hallazgos de `instrucciones_proveedor.txt` sin cambiar ninguno: casi todo DNI, CUIT o email sale `medium`. A su vez, un archivo sospechoso no pasaba por el Revisor salvo que algún hallazgo fuera dudoso, y ese es justo el caso en que el Clasificador pudo ser manipulado. Al ser ciego, el Revisor solo daba una segunda opinión y no podía detectar incoherencias en la respuesta del Clasificador (por ejemplo, "dato ficticio" con riesgo `high`). El consejo recibido sobre el proyecto fue: que el Revisor entre cuando el archivo es malicioso o el Clasificador no tuvo confianza suficiente, y que revise la entrada y la salida del Clasificador.
+- **Decisión:**
+  - **Dudoso** (`risk.is_doubtful`): el archivo es sospechoso según el Guardián (heurística, modelo o fallback) **o** `confidence <= CONFIDENCE_THRESHOLD` (0,7). El riesgo `medium` deja de ser criterio. Los fallbacks siguen sin revisarse.
+  - **El Revisor ve la entrada y la salida del Clasificador.** Recibe el hallazgo enmascarado y el snippet en `<untrusted_data>`, y la respuesta del Clasificador (`is_sensitive`, `risk`, `data_type`, `confidence`, `explanation`) en `<classifier_output>`. Si el archivo es sospechoso, se le avisa que la respuesta pudo ser manipulada. Verifica la respuesta contra la rúbrica y reporta su propia evaluación (`Review`, sin cambios de forma).
+  - **Mitigaciones del anclaje y de la injection de segundo orden:**
+    - el prompt pide no aceptar la respuesta por defecto y trata `<classifier_output>` como dato, no como instrucción;
+    - la explicación (texto libre de otro modelo) se vuelve a enmascarar con `mask_text` y no puede abrir ni cerrar las etiquetas (`rubric.neutralize_tags`);
+    - la comparación sigue en código (`risk.reconcile`, sin cambios): el riesgo final es el máximo, con el piso aplicado, y `needs_review` nunca se apaga. El Revisor puede subir un riesgo, nunca bajarlo.
+  - **Caché.** `review.PROMPT_VERSION` pasa a `v2`. La clave incluye la clasificación (sin `needs_review`) y la marca de sospechoso.
+- **Alternativas descartadas:**
+  - Mantener al Revisor ciego: no detecta incoherencias en la respuesta del Clasificador y revisaba casi todo sin aportar.
+  - Que el Revisor devuelva solo "de acuerdo / en desacuerdo": la comparación en código, campo por campo, es más robusta y además da el riesgo propuesto.
+  - Mantener `medium` como criterio: gasta una llamada por casi cada hallazgo.
+  - Que el Revisor pueda bajar un riesgo o apagar `needs_review`: le daría poder a un modelo que puede ser manipulado.
+- **Consecuencias:**
+  - Muchas menos llamadas en archivos benignos (solo la confianza baja) y revisión completa en los sospechosos.
+  - Riesgo de anclaje: el Revisor puede tender a confirmar al Clasificador. Se mide en el Paso 10 (cuántas discrepancias, y si coinciden con errores reales).
+  - La confianza la reporta el propio modelo y no está calibrada: si casi nunca baja de 0,7, en archivos benignos casi nada se revisa. También se mide en el Paso 10.
+  - El texto libre del Clasificador ahora llega a otro modelo: queda enmascarado y delimitado, pero es una superficie nueva.

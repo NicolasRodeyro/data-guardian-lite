@@ -64,7 +64,7 @@ class Classification(BaseModel):
 
 
 class Review(BaseModel):
-    """Salida estructurada del Revisor. Ciego: no incluye ni recibe el veredicto del Clasificador."""
+    """Salida estructurada del Revisor: su evaluación tras verificar la respuesta del Clasificador."""
 
     model_config = ConfigDict(extra="forbid")
 
