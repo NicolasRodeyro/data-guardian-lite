@@ -48,6 +48,7 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
 
     import guardian.classifier as classifier
     import guardian.cli as cli
+    import guardian.injection as injection
     from tests.conftest import FakeClient, text_response, tool_use_response
 
     (tmp_path / "in").mkdir()
@@ -58,8 +59,10 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
         bloque = SimpleNamespace(type="tool_use", id=f"t_{nombre}", name=nombre, input=entrada)
         return SimpleNamespace(stop_reason="tool_use", content=[bloque], usage=SimpleNamespace(input_tokens=100, output_tokens=20))
 
-    cliente = FakeClient([  # agente y clasificador comparten cliente, como en producción
+    cliente = FakeClient([  # todos los agentes comparten cliente, como en producción
         pedido("scan_file", {"path": "pagos.txt"}),
+        pedido("inspect_file", {"path": "pagos.txt"}),
+        tool_use_response("report_injection", {"suspicious": False, "evidence_type": "none", "confidence": 0.9}),
         pedido("classify_findings", {"finding_ids": [fid]}),
         tool_use_response("report_classification", {
             "is_sensitive": True, "risk": "high", "data_type": "credit_card",
@@ -71,10 +74,12 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "load_settings", lambda: _settings_de_prueba(tmp_path))
     monkeypatch.setattr(cli, "get_client", lambda settings: cliente)
     monkeypatch.setattr(classifier, "DEFAULT_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(injection, "DEFAULT_CACHE_DIR", tmp_path / "guardian_cache")
 
     assert main(["agent", str(tmp_path / "in" / "pagos.txt")]) == 0
     salida = capsys.readouterr().out
     assert "Estado: completed" in salida and "orchestrator → anonymize" in salida
+    assert "guardian: sin indicios" in salida
     assert "classifier: 1 hallazgos, 1 llamadas" in salida
     assert "pagos.report.md" in salida
     assert (tmp_path / "out" / "pagos.anonymized.txt").exists()

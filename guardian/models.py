@@ -74,14 +74,30 @@ class Review(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+EvidenceType = Literal["none", "instruction_override", "tool_request", "role_change", "other"]
+
+
 class InjectionVerdict(BaseModel):
-    """Salida estructurada del Guardián."""
+    """Salida estructurada del Guardián (un bloque de texto)."""
 
     model_config = ConfigDict(extra="forbid")
 
     suspicious: bool
-    evidence_type: Literal["none", "instruction_override", "tool_request", "role_change", "other"]
+    evidence_type: EvidenceType
     confidence: float = Field(ge=0.0, le=1.0)
+
+
+class FileVerdict(BaseModel):
+    """Veredicto final de un archivo: heurística determinística + Guardián, combinados en código."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    suspicious: bool
+    source: Literal["none", "heuristic", "model", "both", "fallback"]
+    evidence_type: EvidenceType
+    heuristic_hits: int = Field(ge=0)
+    model_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    fallback_reason: str | None = None
 
 
 class AuditEvent(BaseModel):

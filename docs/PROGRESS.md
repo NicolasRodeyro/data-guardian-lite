@@ -12,7 +12,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 
 ## Fase B — Multiagente
 - [X] Paso 7 — BaseAgent + Orquestador + Clasificador como agente + reporte final
-- [ ] Paso 8 — Guardián (prompt injection) + heurística + RunState
+- [X] Paso 8 — Guardián (prompt injection) + heurística + RunState
 - [ ] Paso 9 — Revisor (solo dudosos) + conciliación
 
 ## Fase C — Cierre
@@ -27,6 +27,16 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
   - CLI `agent` sobre `instrucciones_proveedor.txt` (desde caché).
   - Con `--no-cache` (opción nueva), sobre `logs_app.txt` (16/19 bien; los 3 "errores" son dudas con `needs_review`) y `config_integracion.txt` (12/12 critical). Total USD 0.012.
 - Commit del paso 7 hecho junto con el checkbox.
+
+## Notas del Paso 8
+- Guardián (`agents/guardian_agent.py` + `injection.py`), heurística y `combine_verdicts` en `risk.py`, `inspect_file` en el Orquestador con precondiciones en `RunState`, y revisión forzada en archivos sospechosos. ADR-027.
+- 299 unitarios verdes, 92 de seguridad. Skill de seguridad aplicada sin incumplimientos.
+- Heurística: 4/4 injections, 0/8 falsos positivos.
+- Integración real con Haiku:
+  - Guardián 6/6 (4 injections con el tipo correcto + 2 benignos).
+  - Orquestador en verde.
+  - CLI sobre `notas_soporte.txt`: SOSPECHOSO (fuente `both`), 9/9 hallazgos a revisión, USD 0.0018.
+- Commit del paso 8 hecho junto con el checkbox.
 
 ## Mejoras para más adelante
 - Snippets hacia la API: hoy solo se enmascaran los 5 tipos detectados; nombres, teléfonos o direcciones del contexto (±40 caracteres) viajan en claro. Opciones: enmascarar nombres/números genéricos en el snippet o achicar el contexto. Mencionarlo en el README como limitación conocida.

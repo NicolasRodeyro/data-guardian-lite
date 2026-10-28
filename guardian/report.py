@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from guardian.models import Classification, Finding, RiskLevel
+from guardian.models import Classification, FileVerdict, Finding, RiskLevel
 
 if TYPE_CHECKING:
     from guardian.classifier import ClassificationResult
@@ -39,7 +39,8 @@ def _location(f: Finding) -> str:
 
 
 def build_file_report(file_name: str, findings: list[Finding], results: dict[str, ClassificationResult], *,
-                      model: str, run_id: str | None = None, anonymized_file: str | None = None) -> dict[str, Any]:
+                      model: str, run_id: str | None = None, anonymized_file: str | None = None,
+                      verdict: FileVerdict | None = None) -> dict[str, Any]:
     filas = []
     for f in findings:
         r = results[f.id]
@@ -63,6 +64,7 @@ def build_file_report(file_name: str, findings: list[Finding], results: dict[str
         "model": model,
         "run_id": run_id,
         "anonymized_file": anonymized_file,
+        "injection": verdict.model_dump(mode="json") if verdict else None,
         "summary": resumen,
         "findings": filas,
     }
@@ -71,8 +73,17 @@ def build_file_report(file_name: str, findings: list[Finding], results: dict[str
 def render_file_report_md(report: dict[str, Any]) -> str:
     s = report["summary"]
     riesgos = " · ".join(f"{k}: {v}" for k, v in s["by_risk"].items())
-    out = [f"# Reporte — {report['file']}", "",
-           f"- Generado: {report['generated_at']} · modelo `{report['model']}` · run `{report['run_id']}`",
+    out = [f"# Reporte — {report['file']}", ""]
+    v = report.get("injection")
+    if v and v["suspicious"]:
+        out += [f"> **⚠ ARCHIVO SOSPECHOSO DE PROMPT INJECTION** (fuente: {v['source']}, evidencia: "
+                f"{v['evidence_type']}, coincidencias de la heurística: {v['heuristic_hits']}). "
+                "Todos sus hallazgos quedan a revisión manual.", ""]
+    elif v:
+        out += ["- Guardián: sin indicios de prompt injection"]
+    else:
+        out += ["- Guardián: no se inspeccionó"]
+    out += [f"- Generado: {report['generated_at']} · modelo `{report['model']}` · run `{report['run_id']}`",
            f"- Copia anonimizada: {report['anonymized_file'] or 'no generada'}",
            f"- {s['findings']} hallazgos · {s['sensitive']} sensibles · {s['needs_review']} a revisión · "
            f"{s['fallbacks']} fallbacks",

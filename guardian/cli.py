@@ -88,7 +88,13 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     llamadas_clasificador = sum(1 for c in clasif if not c.cached)
     for llamada in r.tool_calls:
         extra = ""
-        if llamada.tool == "classify_findings" and llamada.outcome == "ok":
+        if llamada.tool == "inspect_file" and llamada.outcome == "ok":
+            for insp in state.inspections.values():
+                v = insp.verdict
+                estado = "SOSPECHOSO" if v.suspicious else "sin indicios"
+                extra = (f"  (guardian: {estado} · fuente {v.source} · evidencia {v.evidence_type} · "
+                         f"{insp.api_calls} llamadas, {insp.cached_chunks} bloques de caché)")
+        elif llamada.tool == "classify_findings" and llamada.outcome == "ok":
             en_cache = len(clasif) - llamadas_clasificador
             extra = f"  (classifier: {len(clasif)} hallazgos, {llamadas_clasificador} llamadas"
             extra += f", {en_cache} desde caché)" if en_cache else ")"
@@ -98,8 +104,9 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         print(f"\n{r.final_text}\n")
     for archivos in state.reports.values():
         print("Reporte: " + ", ".join(str(settings.output_dir / a) for a in archivos))
-    tokens_in = r.input_tokens + sum(c.input_tokens for c in clasif)
-    tokens_out = r.output_tokens + sum(c.output_tokens for c in clasif)
+    inspecciones = list(state.inspections.values())
+    tokens_in = r.input_tokens + sum(c.input_tokens for c in clasif) + sum(i.input_tokens for i in inspecciones)
+    tokens_out = r.output_tokens + sum(c.output_tokens for c in clasif) + sum(i.output_tokens for i in inspecciones)
     costo = estimate_cost(settings.anthropic_model, tokens_in, tokens_out)
     costo_txt = f"USD {costo:.4f}" if costo is not None else "costo desconocido para este modelo"
     print(f"{state.budget.calls} llamadas a {settings.anthropic_model} · {tokens_in} tokens de entrada, "

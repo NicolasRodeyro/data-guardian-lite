@@ -3,8 +3,10 @@
 Reglas que se cumplen acá:
 - Las rutas se resuelven contra el directorio de entrada; `../`, absolutas externas y symlinks
   que escapen se rechazan antes de abrir nada.
-- Orden (ADR-013): `classify_findings`, `anonymize` y `build_report` exigen que el archivo se
-  haya escaneado en esta corrida; `build_report` exige además todos sus hallazgos clasificados.
+- Orden (ADR-013): `inspect_file`, `anonymize` y `build_report` exigen el archivo escaneado en
+  esta corrida; `classify_findings` y `build_report` exigen además la inspección del Guardián, y
+  `build_report`, todos los hallazgos clasificados.
+- Archivo `suspicious` ⇒ el código fuerza `needs_review=True` en todos sus hallazgos (ADR-027).
 - Ningún resultado trae texto crudo del archivo: solo IDs, tipos, valores enmascarados y
   campos estructurados. La explicación libre del Clasificador no vuelve al Orquestador.
 - `anonymize` y `build_report` no exponen rutas de salida al modelo.
@@ -13,7 +15,7 @@ La lista blanca del Orquestador está en `agents/orchestrator.py`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from guardian.agents.base import Budget, ToolError
 from guardian.anonymizer import AnonymizeError, anonymize_file
 from guardian.audit import AuditLog
 from guardian.classifier import ClassificationResult, classify_finding, texts_by_location
+from guardian.injection import InspectionResult, inspect_file
 from guardian.masking import context_snippet
 from guardian.models import Finding
 from guardian.report import ReportError, build_file_report, write_file_report
@@ -47,14 +50,17 @@ class RunState:
     model: str
     input_dir: Path
     output_dir: Path
-    cache_dir: Path | None = None
-    use_cache: bool = True  # False: ni lee ni escribe la caché de clasificaciones
+    cache_dir: Path | None = None  # caché de clasificaciones
+    guardian_cache_dir: Path | None = None  # caché del Guardián
+    use_cache: bool = True  # False: ni lee ni escribe ninguna caché
     budget: Budget = field(default_factory=Budget)
     audit: AuditLog | None = None
     findings: dict[str, Finding] = field(default_factory=dict)
+    finding_file: dict[str, str] = field(default_factory=dict)  # ID → archivo
     snippets: dict[str, str] = field(default_factory=dict)
     classifications: dict[str, ClassificationResult] = field(default_factory=dict)
     scanned: dict[str, list[str]] = field(default_factory=dict)  # archivo → IDs de sus hallazgos
+    inspections: dict[str, InspectionResult] = field(default_factory=dict)  # archivo → veredicto
     anonymized: dict[str, str] = field(default_factory=dict)  # archivo → copia en output/
     reports: dict[str, list[str]] = field(default_factory=dict)  # archivo → reportes en output/
 
@@ -98,10 +104,12 @@ def tool_scan_file(state: RunState, args: PathInput) -> dict[str, Any]:
     except ScanError as exc:
         raise ToolError(str(exc)) from exc
     textos = texts_by_location(ruta)
+    clave = _file_key(state, ruta)
     for f in hallazgos:
         state.findings[f.id] = f
+        state.finding_file[f.id] = clave
         state.snippets[f.id] = context_snippet(textos[(f.line, f.row, f.col)], f.start, f.end)
-    state.scanned[_file_key(state, ruta)] = [f.id for f in hallazgos]
+    state.scanned[clave] = [f.id for f in hallazgos]
     return {
         "file": ruta.name,
         "count": len(hallazgos),
@@ -117,15 +125,35 @@ def tool_scan_file(state: RunState, args: PathInput) -> dict[str, Any]:
     }
 
 
+def tool_inspect_file(state: RunState, args: PathInput) -> dict[str, Any]:
+    """Invoca al agente Guardián sobre el archivo. `ApiBudgetExceeded` se propaga y corta la corrida."""
+    ruta, clave = _scanned_path(state, args.path)
+    r = inspect_file(ruta, state.client, model=state.model, cache_dir=state.guardian_cache_dir,
+                     use_cache=state.use_cache, budget=state.budget, audit=state.audit)
+    state.inspections[clave] = r
+    v = r.verdict
+    if state.audit is not None:  # el veredicto combinado queda destacado en la auditoría
+        state.audit.record(agent="guardian", step=0, tool="file_verdict", tool_input=v.model_dump(mode="json"),
+                           allowed=True, outcome="fallback" if v.source == "fallback" else "ok", duration_ms=0.0)
+    return {"file": ruta.name, "suspicious": v.suspicious, "source": v.source, "evidence_type": v.evidence_type,
+            "heuristic_hits": v.heuristic_hits}
+
+
 def tool_classify_findings(state: RunState, args: FindingIdsInput) -> dict[str, Any]:
     """Invoca al agente Clasificador por hallazgo. `ApiBudgetExceeded` se propaga y corta la corrida."""
     if not state.scanned:
         raise ToolError("primero hay que correr scan_file", outcome="rejected")
+    ids = _ids_conocidos(state, args.finding_ids)
+    sin_inspeccion = {state.finding_file[i] for i in ids} - set(state.inspections)
+    if sin_inspeccion:
+        raise ToolError("primero hay que correr inspect_file sobre el archivo de estos hallazgos", outcome="rejected")
     resultados = []
-    for fid in _ids_conocidos(state, args.finding_ids):
+    for fid in ids:
         r = classify_finding(state.findings[fid], state.snippets[fid], state.client, model=state.model,
                              cache_dir=state.cache_dir, use_cache=state.use_cache, budget=state.budget,
                              audit=state.audit)
+        if state.inspections[state.finding_file[fid]].verdict.suspicious and not r.classification.needs_review:
+            r = replace(r, classification=r.classification.model_copy(update={"needs_review": True}))
         state.classifications[fid] = r
         c = r.classification
         resultados.append({
@@ -153,6 +181,8 @@ def tool_anonymize(state: RunState, args: PathInput) -> dict[str, Any]:
 
 def tool_build_report(state: RunState, args: PathInput) -> dict[str, Any]:
     ruta, clave = _scanned_path(state, args.path)
+    if clave not in state.inspections:
+        raise ToolError("primero hay que correr inspect_file sobre este archivo", outcome="rejected")
     ids = state.scanned[clave]
     pendientes = [i for i in ids if i not in state.classifications]
     if pendientes:
@@ -161,6 +191,7 @@ def tool_build_report(state: RunState, args: PathInput) -> dict[str, Any]:
     reporte = build_file_report(
         ruta.name, [state.findings[i] for i in ids], state.classifications, model=state.model,
         run_id=state.audit.run_id if state.audit else None, anonymized_file=state.anonymized.get(clave),
+        verdict=state.inspections[clave].verdict,
     )
     try:
         archivos = write_file_report(reporte, state.output_dir)

@@ -233,3 +233,27 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
   - Guardián y Revisor (Pasos 8 y 9) se suman como un `AgentSpec` más, con su propia herramienta de salida.
   - La auditoría muestra qué agente hizo cada cosa: `orchestrator` o `classifier`.
   - El resumen del Orquestador solo se muestra en consola. El reporte no depende del modelo.
+
+## ADR-027 — Guardián: heurística como piso, bloques enmascarados y revisión forzada
+- **Fecha:** 2026-10-28
+- **Estado:** Aceptada
+- **Contexto:** Hasta el Paso 7 el sistema resistía las injections, porque las herramientas y el orden están en código, pero no las señalaba. El Guardián necesita ver el contenido del archivo para detectarlas, y ese contenido es justamente lo no confiable. Además, un modelo puede ser engañado por la misma injection que tiene que detectar.
+- **Decisión:**
+  - **Agente.** El Guardián (`agents/guardian_agent.py`) es un agente de un paso cuya única herramienta es la de salida, `report_injection` → `InjectionVerdict`. No tiene efectos.
+  - **Qué ve.** Recibe el texto con todos los hallazgos enmascarados (`mask_text`), con los CSV como una fila por línea, en bloques de 3000 caracteres dentro de `<untrusted_data>` y con la etiqueta neutralizada. Hace una llamada por bloque, y el archivo es sospechoso si lo es cualquiera de sus bloques. Con más de 20 bloques no se inspecciona y el archivo queda sospechoso (`too_large`).
+  - **Heurística como piso.** `injection_heuristic` en `risk.py` aplica patrones en español e inglés sobre el texto sin tildes, por línea o celda. Si salta, el archivo es `suspicious` aunque el modelo diga que no. `combine_verdicts` arma el `FileVerdict`, que dice de dónde vino la sospecha: `none`, `heuristic`, `model`, `both` o `fallback`.
+  - **Fail-closed.** Si el Guardián falla (refusal, sin salida, salida inválida o error de la API), el archivo queda `suspicious`.
+  - **Orden en código.** El Orquestador suma `inspect_file`. `RunState` exige la inspección antes de `classify_findings` y de `build_report`.
+  - **Revisión forzada.** Si el archivo es `suspicious`, el código pone `needs_review=True` en todos sus hallazgos, y el reporte lo destaca arriba de todo.
+  - **Qué vuelve y qué se registra.** Al Orquestador vuelven solo el veredicto, la fuente, el tipo de evidencia y la cantidad de coincidencias, nunca el texto. El veredicto combinado queda en la auditoría como `guardian / file_verdict`.
+  - **Caché propia.** Va en `output/.cache/guardian`, por bloque y modelo. Los fallbacks no se cachean, y `--no-cache` no lee ni escribe ninguna caché.
+- **Alternativas descartadas:**
+  - Guardián con texto crudo: expondría PII y daría más superficie.
+  - Solo heurística: no generaliza a paráfrasis.
+  - Solo modelo: lo puede engañar la propia injection.
+  - Que el Orquestador decida qué hacer con un archivo sospechoso: es manipulable.
+  - Bloquear el procesamiento de los sospechosos: se perdería la anonimización, que es determinística y segura.
+- **Consecuencias:**
+  - **Resultado en el dataset.** La heurística detecta 4 de 4 injections con 0 falsos positivos en los otros 8 archivos. El modelo (Haiku), por su cuenta, acierta 6 de 6 en los archivos con injection y los benignos con texto imperativo.
+  - **Costo.** Es 1 llamada extra por archivo chico.
+  - **Límites.** La heurística se puede evadir (paráfrasis, otros idiomas, codificaciones): por eso es piso y no reemplazo. El Guardián ve nombres y otros datos no detectados en claro (ver la mejora pendiente sobre snippets).

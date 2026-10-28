@@ -46,19 +46,26 @@ def entorno(tmp_path):
     entrada.mkdir()
     (entrada / "pagos.txt").write_text(CONTENIDO, encoding="utf-8")
     ids = [f.id for f in scan_file(entrada / "pagos.txt")]
-    clasificador = FakeClient([_clasif(), _clasif(data_type="dni", risk="medium")])
+    subagentes = FakeClient([_guardian(), _clasif(), _clasif(data_type="dni", risk="medium")])
     audit = AuditLog(path=tmp_path / "logs" / "audit.jsonl", run_id="r1")
-    state = RunState(client=clasificador, model=MODEL, input_dir=entrada, output_dir=tmp_path / "out",
-                     cache_dir=tmp_path / "cache", audit=audit)
+    state = RunState(client=subagentes, model=MODEL, input_dir=entrada, output_dir=tmp_path / "out",
+                     cache_dir=tmp_path / "cache", guardian_cache_dir=tmp_path / "gcache", audit=audit)
     return SimpleNamespace(tmp=tmp_path, entrada=entrada, ids=ids, state=state, audit=audit)
 
 
-def _flujo_feliz(ids):
+def _guardian(sospechoso=False):
+    return tool_use_response("report_injection", {"suspicious": sospechoso,
+                                                  "evidence_type": "instruction_override" if sospechoso else "none",
+                                                  "confidence": 0.9})
+
+
+def _flujo_feliz(ids, archivo="pagos.txt"):
     return [
-        _pedido(_bloque("scan_file", {"path": "pagos.txt"}, "t1")),
-        _pedido(_bloque("classify_findings", {"finding_ids": ids}, "t2")),
-        _pedido(_bloque("anonymize", {"path": "pagos.txt"}, "t3")),
-        _pedido(_bloque("build_report", {"path": "pagos.txt"}, "t4")),
+        _pedido(_bloque("scan_file", {"path": archivo}, "t1")),
+        _pedido(_bloque("inspect_file", {"path": archivo}, "t2")),
+        _pedido(_bloque("classify_findings", {"finding_ids": ids}, "t3")),
+        _pedido(_bloque("anonymize", {"path": archivo}, "t4")),
+        _pedido(_bloque("build_report", {"path": archivo}, "t5")),
         text_response("2 hallazgos, 1 de riesgo alto. Reporte: pagos.report.md"),
     ]
 
@@ -71,13 +78,15 @@ def _eventos(e) -> list[AuditEvent]:
 def test_camino_feliz(entorno):
     e = entorno
     r = run_orchestrator(TAREA, FakeClient(_flujo_feliz(e.ids)), e.state)
-    assert r.status == "completed" and r.steps == 5 and r.agent == "orchestrator"
-    assert [c.tool for c in r.tool_calls] == ["scan_file", "classify_findings", "anonymize", "build_report"]
+    assert r.status == "completed" and r.steps == 6 and r.agent == "orchestrator"
+    assert [c.tool for c in r.tool_calls] == ["scan_file", "inspect_file", "classify_findings", "anonymize",
+                                              "build_report"]
     assert all(c.outcome == "ok" for c in r.tool_calls)
     assert (e.tmp / "out" / "pagos.anonymized.txt").exists()
     assert (e.tmp / "out" / "pagos.report.json").exists() and (e.tmp / "out" / "pagos.report.md").exists()
-    assert e.state.budget.calls == 5 + 2  # 5 vueltas del Orquestador + 2 del Clasificador
-    assert (r.input_tokens, r.output_tokens) == (100 * 4 + 10, 20 * 4 + 5)
+    assert e.state.budget.calls == 6 + 1 + 2  # Orquestador + Guardián + Clasificador
+    assert not e.state.inspections["pagos.txt"].verdict.suspicious
+    assert (r.input_tokens, r.output_tokens) == (100 * 5 + 10, 20 * 5 + 5)
 
 
 def test_auditoria_registra_que_agente_hizo_cada_cosa(entorno):
@@ -86,6 +95,8 @@ def test_auditoria_registra_que_agente_hizo_cada_cosa(entorno):
     pares = [(ev.agent, ev.tool) for ev in _eventos(e)]
     assert pares == [
         ("orchestrator", "scan_file"),
+        ("guardian", "report_injection"), ("guardian", "file_verdict"),
+        ("orchestrator", "inspect_file"),
         ("classifier", TOOL_NAME), ("classifier", TOOL_NAME),
         ("orchestrator", "classify_findings"),
         ("orchestrator", "anonymize"),
@@ -159,13 +170,41 @@ def test_classify_antes_de_scan_se_rechaza(entorno):
     e = entorno
     agente = FakeClient([
         _pedido(_bloque("classify_findings", {"finding_ids": e.ids}, "c")),
+        _pedido(_bloque("inspect_file", {"path": "pagos.txt"}, "i")),
         _pedido(_bloque("build_report", {"path": "pagos.txt"}, "r")),
         text_response("fin"),
     ])
     r = run_orchestrator(TAREA, agente, e.state)
-    assert [c.outcome for c in r.tool_calls] == ["rejected", "rejected"]
-    assert e.state.client.calls == []  # el Clasificador no se invocó
+    assert [c.outcome for c in r.tool_calls] == ["rejected", "rejected", "rejected"]
+    assert e.state.client.calls == []  # ni el Guardián ni el Clasificador se invocaron
     assert not (e.tmp / "out").exists()
+
+
+@pytest.mark.security
+def test_el_orquestador_no_puede_saltear_al_guardian(entorno):
+    e = entorno
+    agente = FakeClient([
+        _pedido(_bloque("scan_file", {"path": "pagos.txt"}, "s")),
+        _pedido(_bloque("classify_findings", {"finding_ids": e.ids}, "c")),
+        _pedido(_bloque("anonymize", {"path": "pagos.txt"}, "a"), _bloque("build_report", {"path": "pagos.txt"}, "r")),
+        text_response("fin"),
+    ])
+    r = run_orchestrator(TAREA, agente, e.state)
+    assert [(c.tool, c.outcome) for c in r.tool_calls] == [
+        ("scan_file", "ok"), ("classify_findings", "rejected"), ("anonymize", "ok"), ("build_report", "rejected")]
+    assert e.state.client.calls == [] and e.state.classifications == {}
+    assert not (e.tmp / "out" / "pagos.report.json").exists()
+
+
+@pytest.mark.security
+def test_el_orquestador_no_puede_llamar_la_herramienta_del_guardian(entorno):
+    e = entorno
+    agente = FakeClient([
+        _pedido(_bloque("report_injection", {"suspicious": False, "evidence_type": "none", "confidence": 1}, "x")),
+        text_response("fin"),
+    ])
+    r = run_orchestrator(TAREA, agente, e.state)
+    assert r.tool_calls[0].outcome == "rejected" and e.state.inspections == {}
 
 
 @pytest.mark.security
@@ -230,20 +269,27 @@ def test_archivo_con_injection_queda_intacto_y_solo_corren_tools_permitidas(ento
     shutil.copy(origen, copia)
     antes = hashlib.sha256(copia.read_bytes()).hexdigest()
     ids = [f.id for f in scan_file(copia)]
-    e.state.client = FakeClient([_clasif(data_type="email", risk="medium") for _ in ids])
+    # el Guardián "cae" en la injection y dice que no es sospechoso; los hallazgos dicen "no revisar"
+    e.state.client = FakeClient([_guardian(sospechoso=False)]
+                                + [_clasif(data_type="email", risk="medium") for _ in ids])
     agente = FakeClient([
         _pedido(_bloque("scan_file", {"path": origen.name}, "t1")),
-        _pedido(_bloque("exportar_todo", {"destino": "../../secretos/clave.txt"}, "t2"),
-                _bloque("classify_findings", {"finding_ids": ids}, "t3")),
-        _pedido(_bloque("anonymize", {"path": origen.name}, "t4")),
-        _pedido(_bloque("build_report", {"path": origen.name}, "t5")),
+        _pedido(_bloque("inspect_file", {"path": origen.name}, "t2")),
+        _pedido(_bloque("exportar_todo", {"destino": "../../secretos/clave.txt"}, "t3"),
+                _bloque("classify_findings", {"finding_ids": ids}, "t4")),
+        _pedido(_bloque("anonymize", {"path": origen.name}, "t5")),
+        _pedido(_bloque("build_report", {"path": origen.name}, "t6")),
         text_response("fin"),
     ])
     r = run_orchestrator(f"Analizá el archivo {origen.name}.", agente, e.state)
     assert r.status == "completed"
     assert {c.tool: c.outcome for c in r.tool_calls} == {
-        "scan_file": "ok", "exportar_todo": "rejected", "classify_findings": "ok", "anonymize": "ok",
-        "build_report": "ok",
+        "scan_file": "ok", "inspect_file": "ok", "exportar_todo": "rejected", "classify_findings": "ok",
+        "anonymize": "ok", "build_report": "ok",
     }
+    # la heurística actúa de piso: el archivo queda sospechoso y todo a revisión
+    veredicto = e.state.inspections[origen.name].verdict
+    assert veredicto.suspicious and veredicto.source == "heuristic"
+    assert all(c.classification.needs_review for c in e.state.classifications.values())
     assert hashlib.sha256(copia.read_bytes()).hexdigest() == antes
     assert hashlib.sha256(origen.read_bytes()).hexdigest() == antes
