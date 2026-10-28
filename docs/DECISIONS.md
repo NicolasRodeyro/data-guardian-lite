@@ -257,3 +257,30 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
   - **Resultado en el dataset.** La heurística detecta 4 de 4 injections con 0 falsos positivos en los otros 8 archivos. El modelo (Haiku), por su cuenta, acierta 6 de 6 en los archivos con injection y los benignos con texto imperativo.
   - **Costo.** Es 1 llamada extra por archivo chico.
   - **Límites.** La heurística se puede evadir (paráfrasis, otros idiomas, codificaciones): por eso es piso y no reemplazo. El Guardián ve nombres y otros datos no detectados en claro (ver la mejora pendiente sobre snippets).
+
+## ADR-028 — Revisor ciego sobre los dudosos, conciliación en código y rúbrica compartida
+- **Fecha:** 2026-10-28
+- **Estado:** Aceptada
+- **Contexto:** El Clasificador a veces duda o es inconsistente. En el Paso 7, 9 CUIT casi idénticos salieron 8 `medium` y 1 `high` con confianza 0,7, y `needs_review` se usaba como "requiere acción". ADR-013 y ADR-015 ya fijaban que el código elige qué se revisa y que el Revisor es ciego; faltaba definir el criterio concreto, qué pasa cuando vuelve a clasificarse un hallazgo y cómo se unifica el criterio de riesgo.
+- **Decisión:**
+  - **Agente.** El Revisor (`agents/reviewer_agent.py`) es de un paso y su única herramienta es la de salida, `report_review` → `Review`. No tiene efectos. Recibe el mismo input enmascarado que el Clasificador, pero no su veredicto. La caché, el fail-closed y el `ReviewResult` viven en `review.py`, con caché propia en `output/.cache/reviews`.
+  - **Dudoso** (`risk.is_doubtful`): `risk == medium` o `confidence <= CONFIDENCE_THRESHOLD` (0,7, ahora inclusivo). Los fallbacks no se revisan: ya quedaron en `high` y a revisión.
+  - **Orden en código.** El Orquestador suma `review_findings(path)`, que recibe solo el archivo, así que no puede elegir los IDs. Exige todos los hallazgos clasificados. `build_report` rechaza si queda algún dudoso sin revisar. Volver a clasificar un hallazgo descarta su revisión, para que no quede una revisión vieja aplicada a una clasificación nueva.
+  - **Conciliación** (`risk.reconcile`):
+    - si discrepan en `is_sensitive`, `risk` o `data_type`, el hallazgo va a revisión;
+    - el riesgo final es el máximo de los dos, con el piso por tipo aplicado encima;
+    - `is_sensitive` final es el OR de los dos;
+    - `needs_review` nunca se apaga en la conciliación;
+    - si el Revisor falla, el hallazgo va a revisión.
+  - **Rúbrica compartida** (`agents/rubric.py`): un único texto de criterio de riesgo para los dos prompts. "DNI o CUIT sin nombre de persona ⇒ medium; junto a un nombre ⇒ high". El prompt del Clasificador aclara además que `needs_review` es duda o manipulación, no urgencia. `PROMPT_VERSION` del Clasificador pasa a `v2`, lo que invalida su caché.
+  - **Reporte.** Suma la columna "Revisor" (coincide, discrepa, falló o "—") y el resumen de dudosos revisados y sin coincidencia.
+- **Alternativas descartadas:**
+  - Revisar todo: duplica el costo sin ganar mucho en los `high` y `critical` seguros.
+  - Que el Orquestador elija qué revisar: es manipulable.
+  - Revisor que ve el veredicto: se ancla.
+  - Votación o promedio de riesgos: podría bajar un riesgo.
+  - Que el Revisor pueda apagar `needs_review`: un archivo sospechoso perdería la marca.
+- **Consecuencias:**
+  - Una llamada extra por cada hallazgo dudoso, en general DNI, CUIT y emails `medium`.
+  - Las discrepancias por ruido del modelo terminan en revisión manual, con más `needs_review`.
+  - La evaluación del Paso 10 tiene que volver a correrse una sola vez, con la caché `v2`.

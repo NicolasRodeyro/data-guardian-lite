@@ -13,7 +13,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 ## Fase B — Multiagente
 - [X] Paso 7 — BaseAgent + Orquestador + Clasificador como agente + reporte final
 - [X] Paso 8 — Guardián (prompt injection) + heurística + RunState
-- [ ] Paso 9 — Revisor (solo dudosos) + conciliación
+- [X] Paso 9 — Revisor (solo dudosos) + conciliación
 
 ## Fase C — Cierre
 - [ ] Paso 10 — Evaluación completa: reglas / +clasificador / sistema completo + métricas del Guardián
@@ -38,9 +38,18 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
   - CLI sobre `notas_soporte.txt`: SOSPECHOSO (fuente `both`), 9/9 hallazgos a revisión, USD 0.0018.
 - Commit del paso 8 hecho junto con el checkbox.
 
+## Notas del Paso 9
+- Revisor (`agents/reviewer_agent.py` + `review.py`), `is_doubtful` y `reconcile` en `risk.py`, `review_findings` en el Orquestador con precondiciones en `RunState`, rúbrica compartida (`agents/rubric.py`) y columna "Revisor" en el reporte. ADR-028.
+- Resuelto lo anotado en "Mejoras": criterio CUIT/DNI sin nombre, significado de `needs_review` y umbral inclusivo (`<= 0.7`). Clasificador en `PROMPT_VERSION` `v2`.
+- 346 unitarios verdes, 120 de seguridad. Skill de seguridad aplicada sin incumplimientos.
+- Integración real con Haiku: Revisor 3/3 con el riesgo de la rúbrica (CUIT sin nombre `medium`, DNI con nombre `high`, tarjeta `high`); Orquestador en verde.
+- CLI `--no-cache` sobre `instrucciones_proveedor.txt`: los 9 CUIT ahora salen todos `medium` (antes 8 + 1 `high`); 18/18 dudosos revisados, 0 discrepancias; 43 llamadas, USD 0.0135.
+- Para el Paso 10: con "todo `medium` es dudoso" el Revisor revisó el 100 % y no cambió nada. Si la evaluación muestra que no encuentra errores reales, achicar el criterio a solo baja confianza.
+- Commit del paso 9 hecho junto con el checkbox.
+
 ## Mejoras para más adelante
 - Snippets hacia la API: hoy solo se enmascaran los 5 tipos detectados; nombres, teléfonos o direcciones del contexto (±40 caracteres) viajan en claro. Opciones: enmascarar nombres/números genéricos en el snippet o achicar el contexto. Mencionarlo en el README como limitación conocida.
-- **Hacer en el Paso 9, junto con el Revisor:** rúbrica de riesgo compartida entre Clasificador y Revisor, más concreta. Casos observados en el Paso 7:
+- ~~**Hacer en el Paso 9, junto con el Revisor:**~~ (hecho en el Paso 9, ADR-028; falta la corrida de evaluación del Paso 10) rúbrica de riesgo compartida entre Clasificador y Revisor, más concreta. Casos observados en el Paso 7:
   - En `instrucciones_proveedor.txt`, 9 CUIT casi idénticos salieron 8 `medium` y 1 `high` (L3, conf 0.7), aunque ninguno tiene nombre al lado.
   - En `config_integracion.txt`, el modelo usa `needs_review` como "requiere acción" en API keys con confianza alta.
   - Qué hay que aclarar en el prompt:

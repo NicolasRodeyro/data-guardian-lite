@@ -98,15 +98,20 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             en_cache = len(clasif) - llamadas_clasificador
             extra = f"  (classifier: {len(clasif)} hallazgos, {llamadas_clasificador} llamadas"
             extra += f", {en_cache} desde caché)" if en_cache else ")"
+        elif llamada.tool == "review_findings" and llamada.outcome == "ok":
+            revs = list(state.reviews.values())
+            discrepan = sum(1 for x in revs if x.outcome != "agree")
+            extra = (f"  (reviewer: {len(revs)} dudosos de {len(clasif)} · {discrepan} sin coincidencia · "
+                     f"{sum(1 for x in revs if not x.cached)} llamadas)")
         print(f"paso {llamada.step}: {llamada.agent} → {llamada.tool:<18} → {llamada.outcome}{extra}")
     print(f"\nEstado: {r.status} ({r.steps} pasos)")
     if r.final_text:
         print(f"\n{r.final_text}\n")
     for archivos in state.reports.values():
         print("Reporte: " + ", ".join(str(settings.output_dir / a) for a in archivos))
-    inspecciones = list(state.inspections.values())
-    tokens_in = r.input_tokens + sum(c.input_tokens for c in clasif) + sum(i.input_tokens for i in inspecciones)
-    tokens_out = r.output_tokens + sum(c.output_tokens for c in clasif) + sum(i.output_tokens for i in inspecciones)
+    subagentes = [*clasif, *state.inspections.values(), *state.reviews.values()]
+    tokens_in = r.input_tokens + sum(x.input_tokens for x in subagentes)
+    tokens_out = r.output_tokens + sum(x.output_tokens for x in subagentes)
     costo = estimate_cost(settings.anthropic_model, tokens_in, tokens_out)
     costo_txt = f"USD {costo:.4f}" if costo is not None else "costo desconocido para este modelo"
     print(f"{state.budget.calls} llamadas a {settings.anthropic_model} · {tokens_in} tokens de entrada, "

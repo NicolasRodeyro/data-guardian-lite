@@ -28,7 +28,7 @@ from guardian.scanner import scan_file
 __all__ = ["TOOL_NAME", "ClassificationResult", "build_request", "classify_file", "classify_finding",
            "texts_by_location"]
 
-PROMPT_VERSION = "v1"  # forma parte de la clave de caché: cambiarlo si cambia el prompt
+PROMPT_VERSION = "v2"  # forma parte de la clave de caché: cambiarlo si cambia el prompt (v2: rúbrica compartida)
 DEFAULT_CACHE_DIR = Settings().output_dir / ".cache" / "classifications"
 
 # estado del agente → motivo del fallback (los nombres de v1 se conservan)

@@ -3,9 +3,12 @@
 Reglas que se cumplen acá:
 - Las rutas se resuelven contra el directorio de entrada; `../`, absolutas externas y symlinks
   que escapen se rechazan antes de abrir nada.
-- Orden (ADR-013): `inspect_file`, `anonymize` y `build_report` exigen el archivo escaneado en
-  esta corrida; `classify_findings` y `build_report` exigen además la inspección del Guardián, y
-  `build_report`, todos los hallazgos clasificados.
+- Orden (ADR-013): `inspect_file`, `review_findings`, `anonymize` y `build_report` exigen el
+  archivo escaneado en esta corrida; `classify_findings` y `build_report` exigen además la
+  inspección del Guardián; `review_findings`, todos los hallazgos clasificados, y `build_report`,
+  todos clasificados y los dudosos revisados.
+- Qué hallazgos son dudosos lo decide `risk.is_doubtful`, no el Orquestador: `review_findings`
+  recibe solo el archivo. Volver a clasificar un hallazgo descarta su revisión (ADR-028).
 - Archivo `suspicious` ⇒ el código fuerza `needs_review=True` en todos sus hallazgos (ADR-027).
 - Ningún resultado trae texto crudo del archivo: solo IDs, tipos, valores enmascarados y
   campos estructurados. La explicación libre del Clasificador no vuelve al Orquestador.
@@ -29,6 +32,8 @@ from guardian.injection import InspectionResult, inspect_file
 from guardian.masking import context_snippet
 from guardian.models import Finding
 from guardian.report import ReportError, build_file_report, write_file_report
+from guardian.review import ReviewResult, review_finding
+from guardian.risk import is_doubtful, reconcile
 from guardian.scanner import ScanError, scan_file
 
 
@@ -52,13 +57,15 @@ class RunState:
     output_dir: Path
     cache_dir: Path | None = None  # caché de clasificaciones
     guardian_cache_dir: Path | None = None  # caché del Guardián
+    review_cache_dir: Path | None = None  # caché del Revisor
     use_cache: bool = True  # False: ni lee ni escribe ninguna caché
     budget: Budget = field(default_factory=Budget)
     audit: AuditLog | None = None
     findings: dict[str, Finding] = field(default_factory=dict)
     finding_file: dict[str, str] = field(default_factory=dict)  # ID → archivo
     snippets: dict[str, str] = field(default_factory=dict)
-    classifications: dict[str, ClassificationResult] = field(default_factory=dict)
+    classifications: dict[str, ClassificationResult] = field(default_factory=dict)  # ya conciliadas
+    reviews: dict[str, ReviewResult] = field(default_factory=dict)  # ID → revisión (solo dudosos)
     scanned: dict[str, list[str]] = field(default_factory=dict)  # archivo → IDs de sus hallazgos
     inspections: dict[str, InspectionResult] = field(default_factory=dict)  # archivo → veredicto
     anonymized: dict[str, str] = field(default_factory=dict)  # archivo → copia en output/
@@ -155,6 +162,7 @@ def tool_classify_findings(state: RunState, args: FindingIdsInput) -> dict[str, 
         if state.inspections[state.finding_file[fid]].verdict.suspicious and not r.classification.needs_review:
             r = replace(r, classification=r.classification.model_copy(update={"needs_review": True}))
         state.classifications[fid] = r
+        state.reviews.pop(fid, None)  # clasificación nueva ⇒ la revisión anterior ya no aplica
         c = r.classification
         resultados.append({
             "id": fid,
@@ -166,6 +174,35 @@ def tool_classify_findings(state: RunState, args: FindingIdsInput) -> dict[str, 
             "floor_applied": r.floor_applied,
         })
     return {"classified": resultados}
+
+
+def _pending_reviews(state: RunState, ids: list[str]) -> list[str]:
+    """Dudosos sin revisar. Los fallbacks no se revisan: ya quedaron en `high` y a revisión."""
+    return [i for i in ids if i not in state.reviews and state.classifications[i].fallback_reason is None
+            and is_doubtful(state.classifications[i].classification)]
+
+
+def tool_review_findings(state: RunState, args: PathInput) -> dict[str, Any]:
+    """Invoca al agente Revisor sobre los dudosos del archivo y concilia en código.
+
+    El Orquestador no elige qué se revisa: solo indica el archivo. `ApiBudgetExceeded` se propaga.
+    """
+    _, clave = _scanned_path(state, args.path)
+    ids = state.scanned[clave]
+    if any(i not in state.classifications for i in ids):
+        raise ToolError("primero hay que clasificar todos los hallazgos con classify_findings", outcome="rejected")
+    resultados = []
+    for fid in _pending_reviews(state, ids):
+        actual = state.classifications[fid]
+        rev = review_finding(state.findings[fid], state.snippets[fid], state.client, model=state.model,
+                             cache_dir=state.review_cache_dir, use_cache=state.use_cache, budget=state.budget,
+                             audit=state.audit)
+        final, coinciden = reconcile(actual.classification, rev.review, state.findings[fid].data_type)
+        state.classifications[fid] = replace(actual, classification=final)
+        state.reviews[fid] = rev = replace(rev, agrees=coinciden if rev.review is not None else None)
+        resultados.append({"id": fid, "outcome": rev.outcome, "risk": final.risk.value,
+                           "needs_review": final.needs_review})
+    return {"file": Path(clave).name, "findings": len(ids), "reviewed": resultados}
 
 
 def tool_anonymize(state: RunState, args: PathInput) -> dict[str, Any]:
@@ -188,10 +225,14 @@ def tool_build_report(state: RunState, args: PathInput) -> dict[str, Any]:
     if pendientes:
         raise ToolError(f"hay {len(pendientes)} hallazgos sin clasificar: usá classify_findings primero",
                         outcome="rejected")
+    sin_revisar = _pending_reviews(state, ids)
+    if sin_revisar:
+        raise ToolError(f"hay {len(sin_revisar)} hallazgos dudosos sin revisar: usá review_findings primero",
+                        outcome="rejected")
     reporte = build_file_report(
         ruta.name, [state.findings[i] for i in ids], state.classifications, model=state.model,
         run_id=state.audit.run_id if state.audit else None, anonymized_file=state.anonymized.get(clave),
-        verdict=state.inspections[clave].verdict,
+        verdict=state.inspections[clave].verdict, reviews=state.reviews,
     )
     try:
         archivos = write_file_report(reporte, state.output_dir)

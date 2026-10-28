@@ -106,3 +106,65 @@ def test_combine_prefiere_la_evidencia_del_modelo_y_si_no_la_de_la_heuristica():
     assert combine_verdicts(["role_change"], _modelo(True, "tool_request")).evidence_type == "tool_request"
     assert combine_verdicts(["role_change"], _modelo(False)).evidence_type == "role_change"
     assert combine_verdicts([], _modelo(True, "none")).evidence_type == "other"
+
+
+# --- Selección de dudosos y conciliación con el Revisor (Paso 9) ---------------------------
+
+from guardian.models import Review  # noqa: E402
+from guardian.risk import is_doubtful, reconcile  # noqa: E402
+
+
+def _c(risk="medium", confianza=0.9, sensible=True, revisar=False, tipo="dni"):
+    return Classification(is_sensitive=sensible, risk=risk, data_type=tipo, confidence=confianza,
+                          explanation="x", needs_review=revisar)
+
+
+def _r(risk="medium", sensible=True, tipo="dni", confianza=0.8):
+    return Review(is_sensitive=sensible, risk=risk, data_type=tipo, confidence=confianza)
+
+
+@pytest.mark.parametrize("clasif, dudoso", [
+    (_c("medium", 0.99), True),
+    (_c("high", 0.7), True),   # el umbral es inclusivo
+    (_c("high", 0.71), False),
+    (_c("low", 0.5), True),
+    (_c("critical", 0.95), False),
+])
+def test_is_doubtful(clasif, dudoso):
+    assert is_doubtful(clasif) is dudoso
+
+
+def test_coinciden_no_cambia_nada():
+    final, coinciden = reconcile(_c(), _r(), DataType.DNI)
+    assert coinciden and final == _c()
+
+
+@pytest.mark.security
+@pytest.mark.parametrize("revision", [_r(risk="high"), _r(sensible=False), _r(tipo="cuit_cuil")])
+def test_discrepancia_manda_a_revision(revision):
+    final, coinciden = reconcile(_c(), revision, DataType.DNI)
+    assert not coinciden and final.needs_review and final.is_sensitive
+
+
+@pytest.mark.security
+def test_el_riesgo_final_es_el_maximo():
+    assert reconcile(_c("medium"), _r("critical"), DataType.DNI)[0].risk == RiskLevel.CRITICAL
+    assert reconcile(_c("high"), _r("low"), DataType.DNI)[0].risk == RiskLevel.HIGH
+
+
+@pytest.mark.security
+def test_la_conciliacion_respeta_el_piso():
+    # aunque los dos digan "low" (p. ej. ambos manipulados), una tarjeta validada queda en high
+    final, _ = reconcile(_c("low", tipo="credit_card"), _r("low", tipo="credit_card"), DataType.CREDIT_CARD)
+    assert final.risk == RiskLevel.HIGH and final.needs_review
+
+
+@pytest.mark.security
+def test_revisor_fallido_manda_a_revision():
+    final, coinciden = reconcile(_c(), None, DataType.DNI)
+    assert not coinciden and final.needs_review and final.risk == RiskLevel.MEDIUM
+
+
+def test_coincidir_no_apaga_needs_review():
+    final, coinciden = reconcile(_c(revisar=True), _r(), DataType.DNI)
+    assert coinciden and final.needs_review

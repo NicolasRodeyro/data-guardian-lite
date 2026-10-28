@@ -16,6 +16,9 @@ from guardian.models import Classification, FileVerdict, Finding, RiskLevel
 
 if TYPE_CHECKING:
     from guardian.classifier import ClassificationResult
+    from guardian.review import ReviewResult
+
+REVIEW_LABELS = {"not_reviewed": "—", "agree": "coincide", "disagree": "discrepa", "failed": "falló"}
 
 RECOMMENDED_ACTIONS: dict[RiskLevel, str] = {
     RiskLevel.LOW: "sin acción",
@@ -40,7 +43,10 @@ def _location(f: Finding) -> str:
 
 def build_file_report(file_name: str, findings: list[Finding], results: dict[str, ClassificationResult], *,
                       model: str, run_id: str | None = None, anonymized_file: str | None = None,
-                      verdict: FileVerdict | None = None) -> dict[str, Any]:
+                      verdict: FileVerdict | None = None,
+                      reviews: dict[str, ReviewResult] | None = None) -> dict[str, Any]:
+    """`results` ya viene conciliado; `reviews` solo tiene los hallazgos que pasaron por el Revisor."""
+    reviews = reviews or {}
     filas = []
     for f in findings:
         r = results[f.id]
@@ -49,6 +55,7 @@ def build_file_report(file_name: str, findings: list[Finding], results: dict[str
             "id": f.id, "type": f.data_type.value, "masked_value": f.masked_value, "location": _location(f),
             "is_sensitive": c.is_sensitive, "risk": c.risk.value, "confidence": round(c.confidence, 2),
             "needs_review": c.needs_review, "floor_applied": r.floor_applied, "fallback": r.fallback_reason,
+            "review": reviews[f.id].outcome if f.id in reviews else "not_reviewed",
             "action": recommended_action(c),
         })
     resumen = {
@@ -56,6 +63,8 @@ def build_file_report(file_name: str, findings: list[Finding], results: dict[str
         "sensitive": sum(1 for x in filas if x["is_sensitive"]),
         "needs_review": sum(1 for x in filas if x["needs_review"]),
         "fallbacks": sum(1 for x in filas if x["fallback"]),
+        "reviewed": sum(1 for x in filas if x["review"] != "not_reviewed"),
+        "review_disagreements": sum(1 for x in filas if x["review"] in ("disagree", "failed")),
         "by_risk": {r.value: sum(1 for x in filas if x["risk"] == r.value) for r in RiskLevel},
     }
     return {
@@ -87,13 +96,15 @@ def render_file_report_md(report: dict[str, Any]) -> str:
            f"- Copia anonimizada: {report['anonymized_file'] or 'no generada'}",
            f"- {s['findings']} hallazgos · {s['sensitive']} sensibles · {s['needs_review']} a revisión · "
            f"{s['fallbacks']} fallbacks",
+           f"- Revisor: {s['reviewed']} dudosos revisados · {s['review_disagreements']} sin coincidencia",
            f"- Por riesgo: {riesgos}", ""]
     if report["findings"]:
-        out += ["| Tipo | Valor | Ubicación | Riesgo | Sensible | Revisar | Acción |", "|---|---|---|---|---|---|---|"]
+        out += ["| Tipo | Valor | Ubicación | Riesgo | Sensible | Revisor | Revisar | Acción |",
+                "|---|---|---|---|---|---|---|---|"]
         for x in report["findings"]:
             out.append(f"| {x['type']} | `{x['masked_value']}` | {x['location']} | {x['risk']} "
-                       f"| {'sí' if x['is_sensitive'] else 'no'} | {'sí' if x['needs_review'] else 'no'} "
-                       f"| {x['action']} |")
+                       f"| {'sí' if x['is_sensitive'] else 'no'} | {REVIEW_LABELS[x['review']]} "
+                       f"| {'sí' if x['needs_review'] else 'no'} | {x['action']} |")
     else:
         out.append("Sin hallazgos.")
     return "\n".join(out) + "\n"

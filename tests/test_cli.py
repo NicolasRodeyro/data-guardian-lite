@@ -49,6 +49,7 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
     import guardian.classifier as classifier
     import guardian.cli as cli
     import guardian.injection as injection
+    import guardian.review as review
     from tests.conftest import FakeClient, text_response, tool_use_response
 
     (tmp_path / "in").mkdir()
@@ -66,7 +67,10 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
         pedido("classify_findings", {"finding_ids": [fid]}),
         tool_use_response("report_classification", {
             "is_sensitive": True, "risk": "high", "data_type": "credit_card",
-            "confidence": 0.9, "explanation": "Tarjeta.", "needs_review": False}),
+            "confidence": 0.7, "explanation": "Tarjeta.", "needs_review": False}),  # 0.7 ⇒ dudoso
+        pedido("review_findings", {"path": "pagos.txt"}),
+        tool_use_response("report_review", {
+            "is_sensitive": True, "risk": "critical", "data_type": "credit_card", "confidence": 0.8}),
         pedido("anonymize", {"path": "pagos.txt"}),
         pedido("build_report", {"path": "pagos.txt"}),
         text_response("1 hallazgo de riesgo alto. Copia: pagos.anonymized.txt"),
@@ -75,12 +79,15 @@ def test_agent_corre_el_flujo_completo(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "get_client", lambda settings: cliente)
     monkeypatch.setattr(classifier, "DEFAULT_CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(injection, "DEFAULT_CACHE_DIR", tmp_path / "guardian_cache")
+    monkeypatch.setattr(review, "DEFAULT_CACHE_DIR", tmp_path / "review_cache")
 
     assert main(["agent", str(tmp_path / "in" / "pagos.txt")]) == 0
     salida = capsys.readouterr().out
     assert "Estado: completed" in salida and "orchestrator → anonymize" in salida
     assert "guardian: sin indicios" in salida
     assert "classifier: 1 hallazgos, 1 llamadas" in salida
+    assert "reviewer: 1 dudosos de 1 · 1 sin coincidencia · 1 llamadas" in salida
+    assert (tmp_path / "review_cache").exists()
     assert "pagos.report.md" in salida
     assert (tmp_path / "out" / "pagos.anonymized.txt").exists()
     assert (tmp_path / "out" / "pagos.report.json").exists()

@@ -22,11 +22,12 @@ def test_orquestador_completa_el_flujo_sobre_un_archivo_chico(tmp_path):
     audit = AuditLog(path=tmp_path / "audit.jsonl")
     state = RunState(client=cliente, model=settings.anthropic_model, input_dir=entrada,
                      output_dir=tmp_path / "out", cache_dir=tmp_path / "cache",
-                     guardian_cache_dir=tmp_path / "gcache", audit=audit)
+                     guardian_cache_dir=tmp_path / "gcache", review_cache_dir=tmp_path / "rcache", audit=audit)
     r = run_orchestrator("Analizá el archivo pagos.txt.", cliente, state)
     assert r.status == "completed", r.status
     herramientas = {c.tool for c in r.tool_calls if c.outcome == "ok"}
-    assert {"scan_file", "inspect_file", "classify_findings", "anonymize", "build_report"} <= herramientas
+    assert {"scan_file", "inspect_file", "classify_findings", "review_findings", "anonymize",
+            "build_report"} <= herramientas
     assert not state.inspections["pagos.txt"].verdict.suspicious
     assert (tmp_path / "out" / "pagos.anonymized.txt").exists()
     assert (tmp_path / "out" / "pagos.report.md").exists()

@@ -21,7 +21,7 @@ DEFAULT_MODEL = "claude-haiku-5-5"
 MAX_AGENT_STEPS = 8
 MAX_API_CALLS_PER_RUN = 200
 MAX_FILE_MB = 5.0
-CONFIDENCE_THRESHOLD = 0.7
+CONFIDENCE_THRESHOLD = 0.7  # confianza <= umbral ⇒ el hallazgo es dudoso y pasa por el Revisor
 CONTEXT_CHARS = 40
 
 

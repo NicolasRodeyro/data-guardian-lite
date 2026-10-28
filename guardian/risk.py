@@ -3,6 +3,8 @@
 - Piso de riesgo por tipo validado (ADR-010): la IA no puede rebajar hallazgos fuertes. El
   scanner solo reporta tarjetas que pasan Luhn y CUIT con dígito verificador correcto, así que
   el piso se aplica a todo hallazgo de esos tipos.
+- Selección de dudosos y conciliación con el Revisor (ADR-013, ADR-015): las decide el
+  código, no el Orquestador ni el modelo.
 - Heurística de prompt injection (ADR-014): piso del Guardián. Si salta, el archivo es
   sospechoso aunque el modelo diga que no.
 """
@@ -13,7 +15,8 @@ import re
 import unicodedata
 from collections.abc import Iterable
 
-from guardian.models import Classification, DataType, FileVerdict, InjectionVerdict, RiskLevel
+from guardian.config import CONFIDENCE_THRESHOLD
+from guardian.models import Classification, DataType, FileVerdict, InjectionVerdict, Review, RiskLevel
 
 RISK_FLOORS: dict[DataType, RiskLevel] = {
     DataType.CREDIT_CARD: RiskLevel.HIGH,
@@ -32,6 +35,34 @@ def apply_risk_floor(classification: Classification, rule_type: DataType) -> tup
     if piso is None or classification.risk.rank >= piso.rank:
         return classification, False
     return classification.model_copy(update={"risk": piso, "is_sensitive": True, "needs_review": True}), True
+
+
+def is_doubtful(classification: Classification, threshold: float = CONFIDENCE_THRESHOLD) -> bool:
+    """Hallazgo que pasa por el Revisor: riesgo medio o confianza hasta el umbral (inclusive)."""
+    return classification.risk == RiskLevel.MEDIUM or classification.confidence <= threshold
+
+
+def reconcile(classification: Classification, review: Review | None,
+              rule_type: DataType) -> tuple[Classification, bool]:
+    """Concilia Clasificador y Revisor (ADR-015). Devuelve (clasificación final, coinciden).
+
+    - Revisor falló ⇒ a revisión (fail-closed).
+    - Discrepan en sensibilidad, riesgo o tipo ⇒ a revisión.
+    - El riesgo final es el máximo de los dos y nunca queda bajo el piso: el Revisor puede subir
+      un riesgo, nunca bajarlo. `needs_review` nunca se apaga acá.
+    """
+    if review is None:
+        return classification.model_copy(update={"needs_review": True}), False
+    coinciden = (review.is_sensitive == classification.is_sensitive and review.risk == classification.risk
+                 and review.data_type == classification.data_type)
+    riesgo = max(classification.risk, review.risk, key=lambda r: r.rank)
+    final = classification.model_copy(update={
+        "risk": riesgo,
+        "is_sensitive": classification.is_sensitive or review.is_sensitive,
+        "needs_review": classification.needs_review or not coinciden,
+    })
+    final, _ = apply_risk_floor(final, rule_type)
+    return final, coinciden
 
 
 # (tipo de evidencia, patrón). Se aplican sobre texto en minúsculas y sin tildes, por línea o
