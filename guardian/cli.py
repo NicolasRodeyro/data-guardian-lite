@@ -120,22 +120,35 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return 0 if r.status == "completed" else 1
 
 
+EVAL_MODES = {"all": list(MODES), "both": ["rules", "classifier"]}
+
+
 def _cmd_eval(args: argparse.Namespace) -> int:
     settings = load_settings()
-    modos = list(MODES) if args.mode == "both" else [args.mode]
-    client = get_client(settings) if "classifier" in modos else None
+    modos = EVAL_MODES.get(args.mode, [args.mode])
+    client = get_client(settings) if modos != ["rules"] else None
+    cache = settings.output_dir / ".cache"
+    audit = AuditLog(path=settings.logs_dir / "audit.jsonl") if "full" in modos else None
     reporte = run_evaluation(modos, settings.input_dir, client=client, model=settings.anthropic_model,
-                             cache_dir=settings.output_dir / ".cache" / "classifications")
+                             cache_dir=cache / "classifications", guardian_cache_dir=cache / "guardian",
+                             review_cache_dir=cache / "reviews", output_dir=settings.output_dir,
+                             use_cache=not args.no_cache, audit=audit)
     for m in reporte["modes"]:
         x = m["metrics"]
         print(f"{m['mode']:<11} precisión={format_pct(x['precision']):>6} recall={format_pct(x['recall']):>6} "
               f"F1={format_pct(x['f1']):>6}  TP={x['tp']} FP={x['fp']} FN={x['fn']} FP evitados={x['tn']}")
         s = m["stats"]
-        if m["mode"] == "classifier":
-            costo = f"USD {s['cost_usd']:.4f}" if s["cost_usd"] is not None else "costo desconocido"
-            print(f"{'':<11} {s['api_calls']} llamadas a {s['model']} ({s['cached']} desde caché) · "
-                  f"{s['input_tokens']} tokens de entrada, {s['output_tokens']} de salida · {costo} · "
-                  f"needs_review={s['needs_review']} fallbacks={s['fallbacks']}")
+        if m["mode"] == "rules":
+            continue
+        costo = f"USD {s['cost_usd']:.4f}" if s["cost_usd"] is not None else "costo desconocido"
+        print(f"{'':<11} {s['api_calls']} llamadas a {s['model']} · {s['input_tokens']} tokens de entrada, "
+              f"{s['output_tokens']} de salida · {costo} · needs_review={s['needs_review']} fallbacks={s['fallbacks']}")
+        if m["mode"] == "full":
+            g, rv, o = s["guardian"], s["reviewer"], s["orchestrator"]
+            print(f"{'':<11} guardián: {g['tp']}/{g['tp'] + g['fn']} injections, {g['fp']} falsos positivos · "
+                  f"revisor: {rv['reviewed']} revisados, {rv['disagree']} discrepan (útil {rv['useful']}, "
+                  f"ruido {rv['noise']}, anclaje {rv['anchored']}) · orquestador: {o['completed']}/{o['files']} "
+                  f"completos, {o['not_whitelisted']} tools fuera de lista")
     md, js = write_report(reporte, settings.output_dir)
     print(f"Reporte: {md} y {js}")
     return 0
@@ -152,8 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
     for nombre, (descripcion, _paso) in SUBCOMANDOS.items():
         p = sub.add_parser(nombre, help=descripcion)
         if nombre in SIN_RUTA:
-            p.add_argument("--mode", choices=[*MODES, "both"], default="both",
-                           help="rules: solo reglas · classifier: reglas + IA · both: los dos (default)")
+            p.add_argument("--mode", choices=[*MODES, *EVAL_MODES], default="all",
+                           help="rules: solo reglas · classifier: reglas + Clasificador · full: sistema completo "
+                                "(Orquestador + Guardián + Clasificador + Revisor) · both: rules + classifier · "
+                                "all: los tres (default)")
+            p.add_argument("--no-cache", action="store_true", help="llama a la API sin leer ni escribir la caché")
             continue
         p.add_argument("ruta", nargs="?", help="archivo de entrada (dentro de data/)")
         if nombre == "anonymize":

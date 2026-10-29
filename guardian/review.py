@@ -35,6 +35,7 @@ class ReviewResult:
     cached: bool = False
     fallback_reason: str | None = None
     agrees: bool | None = None  # lo completa la conciliación
+    classifier: Classification | None = None  # veredicto del Clasificador antes de conciliar (evaluación)
     input_tokens: int = 0
     output_tokens: int = 0
 

@@ -173,3 +173,44 @@ def test_anonymize_escribe_en_el_directorio_de_salida(tmp_path, monkeypatch, cap
     assert destino.read_text(encoding="utf-8") == "DNI [DNI_REDACTED]\n"
     assert main(["anonymize", str(ruta)]) == 1  # ya existe y no se pasó --overwrite
     assert main(["anonymize", str(ruta), "--overwrite"]) == 0
+
+
+def test_eval_full_corre_el_sistema_completo(tmp_path, monkeypatch, capsys):
+    import json
+    from types import SimpleNamespace
+
+    import guardian.cli as cli
+    from tests.conftest import FakeClient, text_response, tool_use_response
+
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "pagos.txt").write_text("Pago con 4539 1488 0343 6467\n", encoding="utf-8")
+    (tmp_path / "in" / "labels.jsonl").write_text(json.dumps(
+        {"file": "pagos.txt", "line": 1, "row": None, "col": None, "start": 9, "end": 28,
+         "type": "credit_card", "value": "x", "is_sensitive": True}) + "\n", encoding="utf-8")
+
+    def pedido(nombre, entrada):
+        bloque = SimpleNamespace(type="tool_use", id=f"t_{nombre}", name=nombre, input=entrada)
+        return SimpleNamespace(stop_reason="tool_use", content=[bloque], usage=SimpleNamespace(input_tokens=100, output_tokens=20))
+
+    cliente = FakeClient([  # Orquestador y subagentes comparten cliente, como en producción
+        pedido("scan_file", {"path": "pagos.txt"}),
+        pedido("inspect_file", {"path": "pagos.txt"}),
+        tool_use_response("report_injection", {"suspicious": False, "evidence_type": "none", "confidence": 0.9}),
+        pedido("classify_findings", {"finding_ids": ["pagos.txt:L1:9"]}),
+        tool_use_response("report_classification", {
+            "is_sensitive": True, "risk": "high", "data_type": "credit_card",
+            "confidence": 0.95, "explanation": "Tarjeta.", "needs_review": False}),  # no es dudoso
+        pedido("review_findings", {"path": "pagos.txt"}),
+        pedido("anonymize", {"path": "pagos.txt"}),
+        pedido("build_report", {"path": "pagos.txt"}),
+        text_response("listo"),
+    ])
+    monkeypatch.setattr(cli, "load_settings", lambda: _settings_de_prueba(tmp_path))
+    monkeypatch.setattr(cli, "get_client", lambda settings: cliente)
+    assert main(["eval", "--mode", "full"]) == 0
+    salida = capsys.readouterr().out
+    assert "full" in salida and "recall=100.0%" in salida
+    assert "orquestador: 1/1 completos, 0 tools fuera de lista" in salida
+    assert (tmp_path / "out" / "eval_report.md").exists()
+    assert (tmp_path / "out" / ".cache" / "classifications").exists()  # cachés bajo output/
+    assert "1488" not in salida

@@ -307,3 +307,31 @@ Nuevas decisiones: `/decision <título>`. No editar entradas existentes; si una 
   - Riesgo de anclaje: el Revisor puede tender a confirmar al Clasificador. Se mide en el Paso 10 (cuántas discrepancias, y si coinciden con errores reales).
   - La confianza la reporta el propio modelo y no está calibrada: si casi nunca baja de 0,7, en archivos benignos casi nada se revisa. También se mide en el Paso 10.
   - El texto libre del Clasificador ahora llega a otro modelo: queda enmascarado y delimitado, pero es una superficie nueva.
+
+## ADR-030 — Evaluación del sistema completo a través del Orquestador real
+- **Fecha:** 2026-10-28
+- **Estado:** Aceptada (amplía ADR-025)
+- **Contexto:** El Paso 10 tiene que medir si cada pieza aporta: Clasificador, Guardián, Revisor y Orquestador. Correr el pipeline directo con las herramientas sería más barato y determinístico, pero dejaría al Orquestador sin medir, y es justamente la pieza cuyo valor se cuestionó (en este flujo el orden lo impone el código).
+- **Decisión:**
+  - **Modos.** `eval --mode rules|classifier|full|all` (`both` = rules + classifier; `all` es el default). `--no-cache` como en `agent`.
+  - **`full`, una corrida por archivo.** Cada archivo es una corrida independiente, igual que `guardian.cli agent`: un `RunState` nuevo, la tarea "Analizá el archivo X." y el Orquestador real. Las salidas van a `output/eval_full/`.
+  - **Si el Orquestador no completa el análisis.** El código corre lo que falta (scan, inspect, classify, review) con las mismas herramientas y lo registra como fallo del Orquestador. Así un error suyo no contamina las métricas de los subagentes.
+  - **Positivo** = `is_sensitive or needs_review` sobre la clasificación ya conciliada. En archivos sospechosos todo queda a revisión (fail-closed).
+  - **Métricas nuevas:**
+    - Guardián por archivo contra `file_labels.jsonl`: TP, FP, FN y TN, con la fuente de cada detección.
+    - Errores dentro de los archivos con injection, en cada modo.
+    - Aporte del Revisor, cruzado con la verdad gracias a `ReviewResult.classifier` (el veredicto previo a la conciliación):
+      - útil: contradijo y el Clasificador erraba;
+      - ruido: contradijo y el Clasificador acertaba;
+      - anclaje: repitió un error;
+      - solo riesgo o tipo: discrepancias que las etiquetas no permiten juzgar.
+    - Calibración: tasa de error del Clasificador con confianza ≤ 0,7 contra > 0,7.
+    - Orquestador: archivos completados, estados, pasos promedio, herramientas rechazadas o fuera de la lista blanca, y pasos que completó el código.
+- **Alternativas descartadas:**
+  - Pipeline directo sin Orquestador: no mide al Orquestador.
+  - Una sola corrida del Orquestador para los 12 archivos: no es como se usa la CLI y supera el `MAX_AGENT_STEPS`.
+  - Descartar los archivos que el Orquestador no completa: mezclaría sus fallos con los de los subagentes.
+- **Consecuencias:**
+  - Cuesta unas 7 llamadas del Orquestador por archivo. El Clasificador y el Revisor comparten caché con el modo `classifier` y con `agent`.
+  - Los resultados de `full` varían un poco entre corridas, porque el Orquestador no es determinístico.
+  - Las etiquetas solo dicen si un dato es sensible, no su riesgo: el aporte del Revisor en riesgo no se puede juzgar contra la verdad.

@@ -181,7 +181,7 @@ def _suspicious(state: RunState, fid: str) -> bool:
     return state.inspections[state.finding_file[fid]].verdict.suspicious
 
 
-def _pending_reviews(state: RunState, ids: list[str]) -> list[str]:
+def pending_reviews(state: RunState, ids: list[str]) -> list[str]:
     """Dudosos sin revisar. Los fallbacks no se revisan: ya quedaron en `high` y a revisión."""
     return [i for i in ids if i not in state.reviews and state.classifications[i].fallback_reason is None
             and is_doubtful(state.classifications[i].classification, suspicious=_suspicious(state, i))]
@@ -197,7 +197,7 @@ def tool_review_findings(state: RunState, args: PathInput) -> dict[str, Any]:
     if any(i not in state.classifications for i in ids):
         raise ToolError("primero hay que clasificar todos los hallazgos con classify_findings", outcome="rejected")
     resultados = []
-    for fid in _pending_reviews(state, ids):
+    for fid in pending_reviews(state, ids):
         actual = state.classifications[fid]
         rev = review_finding(state.findings[fid], state.snippets[fid], actual.classification, state.client,
                              model=state.model, suspicious=_suspicious(state, fid),
@@ -205,7 +205,8 @@ def tool_review_findings(state: RunState, args: PathInput) -> dict[str, Any]:
                              audit=state.audit)
         final, coinciden = reconcile(actual.classification, rev.review, state.findings[fid].data_type)
         state.classifications[fid] = replace(actual, classification=final)
-        state.reviews[fid] = rev = replace(rev, agrees=coinciden if rev.review is not None else None)
+        state.reviews[fid] = rev = replace(rev, agrees=coinciden if rev.review is not None else None,
+                                           classifier=actual.classification)
         resultados.append({"id": fid, "outcome": rev.outcome, "risk": final.risk.value,
                            "needs_review": final.needs_review})
     return {"file": Path(clave).name, "findings": len(ids), "reviewed": resultados}
@@ -231,7 +232,7 @@ def tool_build_report(state: RunState, args: PathInput) -> dict[str, Any]:
     if pendientes:
         raise ToolError(f"hay {len(pendientes)} hallazgos sin clasificar: usá classify_findings primero",
                         outcome="rejected")
-    sin_revisar = _pending_reviews(state, ids)
+    sin_revisar = pending_reviews(state, ids)
     if sin_revisar:
         raise ToolError(f"hay {len(sin_revisar)} hallazgos dudosos sin revisar: usá review_findings primero",
                         outcome="rejected")

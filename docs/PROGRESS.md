@@ -16,7 +16,7 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
 - [X] Paso 9 — Revisor (solo dudosos) + conciliación
 
 ## Fase C — Cierre
-- [ ] Paso 10 — Evaluación completa: reglas / +clasificador / sistema completo + métricas del Guardián
+- [X] Paso 10 — Evaluación completa: reglas / +clasificador / sistema completo + métricas del Guardián
 - [ ] Paso 11 — Streamlit
 - [ ] Cierre — README con instrucciones, arquitectura, resultados de eval y demo
 
@@ -62,6 +62,25 @@ Entrega: jueves 2026-10-29. Marcar con [x] solo cuando `pytest` está verde y ha
   - otra clasificación no usa la caché.
 - Integración real con Haiku, 4/4 verdes. Con una clasificación equivocada a propósito (`low`, 0.5, "dato de prueba"), el Revisor la corrigió en los 3 casos: CUIT sin nombre `medium`, DNI con nombre `high`, tarjeta `high`. No se ancló. El Orquestador completó el flujo.
 - A medir en el Paso 10: anclaje del Revisor y si la confianza baja coincide con errores reales.
+
+## Notas del Paso 10
+- `eval --mode rules|classifier|full|all` (default `all`). El modo `full` pasa por el Orquestador real, archivo por archivo; si no completa, el código termina los pasos y lo cuenta como fallo. Métricas del Guardián, Revisor (útil/ruido/anclaje), calibración, Orquestador e impacto de la injection. ADR-030.
+- 363 unitarios verdes, 126 de seguridad, pyflakes limpio.
+- Corrida real con Haiku (2026-10-28), `output/eval_report.{md,json}`:
+
+  | Modo | Precisión | Recall | FP | FN | needs_review | Costo |
+  |---|---|---|---|---|---|---|
+  | Solo reglas | 94.4% | 100% | 15 | 0 | — | — |
+  | Reglas + Clasificador | 95.9% | 100% | 11 | 0 | 11 | USD 0.079 (265 llamadas) |
+  | Sistema completo | 95.9% | 100% | 11 | 0 | 65 | USD 0.067 (162 llamadas; clasificaciones desde caché) |
+
+  - Guardián: 4/4 injections detectadas (heurística y modelo coinciden), 0/8 falsos positivos en benignos.
+  - Injections: 0 FP y 0 FN dentro de los 4 archivos con injection, en los tres modos.
+  - Revisor: 76 revisados (54 por archivo sospechoso, 22 por confianza baja); 2 discrepancias, las 2 útiles (0 ruido); 2 casos de anclaje.
+  - Calibración: con confianza ≤ 0.7 se equivoca el 18.2 % (4/22); con > 0.7, el 1.2 % (3/248). El umbral separa bien.
+  - Orquestador: 12/12 completos sin ayuda del código, 6.2 pasos promedio, 0 tools rechazadas o fuera de lista.
+  - Los 11 FP restantes son todos DNI. En 4 de `logs_app.txt` la IA dijo "no sensible" pero pidió revisión; cuentan como positivo por el criterio fail-closed (`is_sensitive or needs_review`). Los 4 de `facturacion.csv` son DNI sin nombre que la rúbrica v2 manda a `medium` sensible: por eso el Clasificador evita menos FP que en el Paso 6 (4 contra 8).
+  - El Revisor no cambia las métricas: cuando discrepa, el hallazgo va a `needs_review`, que ya cuenta como positivo. Su aporte es marcar para humano, no filtrar.
 
 ## Mejoras para más adelante
 - Snippets hacia la API: hoy solo se enmascaran los 5 tipos detectados; nombres, teléfonos o direcciones del contexto (±40 caracteres) viajan en claro. Opciones: enmascarar nombres/números genéricos en el snippet o achicar el contexto. Mencionarlo en el README como limitación conocida.

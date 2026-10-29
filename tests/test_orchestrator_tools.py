@@ -380,6 +380,7 @@ def test_discrepancia_manda_a_revision_con_el_riesgo_maximo(state):
     c = state.classifications[ids[1]].classification
     assert c.risk.value == "high" and c.needs_review
     assert state.reviews[ids[1]].outcome == "disagree"
+    assert state.reviews[ids[1]].classifier.risk.value == "medium"  # veredicto previo, para la evaluación
 
 
 @pytest.mark.security
